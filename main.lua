@@ -1,14 +1,29 @@
 --[[
-    BF // PVP — APEX v5 (final, clean)
+    S+AIMxPvP — APEX v6 (INPUT PURO)
     Aimbot nas skills + Soru guiado (R) + Menu mínimo + Lista de exclusão
+    https://github.com/M4Th777/SM-AIMxPvP
+
+    EXECUTAR VIA LOADSTRING:
+    loadstring(game:HttpGet("https://raw.githubusercontent.com/M4Th777/SM-AIMxPvP/main/main.lua"))()
+
+    v6 — INPUT PURO (VirtualInputManager) + auto-cast com cooldown real
 
     CONTROLES:
       RightShift   = Aimbot ON/OFF
+      RightAlt     = AUTO-CAST ON/OFF (aperta a skill por você, via input nativo)
       RightControl = Abre/fecha menu
       End          = Descarregar script
       Z X C V F    = Skills (ao segurar: mira trava no alvo)
       R            = Soru guiado no alvo (respeita distância máx. real)
+      MB4 / MB5    = Ciclar alvo / Ocultar menu (modo legit)
+
+    POR QUE INPUT PURO:
+      A tecla é enviada pelo VirtualInputManager, então quem trata o cast é o
+      próprio jogo (MovesetClientRunner -> CommF_). O servidor valida como se
+      você tivesse apertado. Nada de FireServer em remote de skill.
 ]]
+
+local SCRIPT_NAME = "S+AIMxPvP"
 
 -- ══════════════ CONFIG ══════════════
 local CONFIG = {
@@ -17,6 +32,7 @@ local CONFIG = {
         Menu   = Enum.KeyCode.RightControl,
         Unload = Enum.KeyCode.End,
         Soru   = Enum.KeyCode.R,
+        Auto   = Enum.KeyCode.RightAlt,
         Skills = { Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C, Enum.KeyCode.V, Enum.KeyCode.F },
     },
     Target = {
@@ -30,8 +46,18 @@ local CONFIG = {
         HitPart   = "Head",        -- "Head" | "HumanoidRootPart"
         Predict   = true,
         PredictX  = 1.0,           -- força da predição (ping x velocidade)
+        MaxLead   = 6.0,           -- teto da correção em studs (evita over-shoot em strafe)
         Smooth    = 0.0,           -- 0 = snap (máxima precisão)
         Indicator = true,
+    },
+    Auto = {
+        Enabled    = false,        -- ligado só pelo RightAlt (não assusta no farm)
+        HoldTime   = 0.05,         -- quanto tempo a tecla fica pressionada
+        GapTime    = 0.12,         -- intervalo mínimo entre envios
+        MaxAngle   = 6.0,          -- só aperta se a mira estiver a <= X graus do alvo
+        AlignFrames = 1,           -- frames alinhados exigidos antes de apertar
+        CooldownFallback = 4.0,    -- cooldown usado se o jogo não informar o real
+        WallCheck  = false,        -- não casta com parede na frente (pode dar falso negativo)
     },
     Soru = {
         Enabled     = true,
@@ -80,10 +106,136 @@ local State = {
     TickList   = 0,
     LastSoru   = 0,
     SoruStep   = nil,  -- corpo em movimento guiado
+    -- ── input puro / auto-cast ──
+    SlotOrder  = {},   -- ordem de prioridade dos slots (1..5)
+    SlotKey    = {},   -- slot -> Enum.KeyCode
+    SlotCd     = {},   -- slot -> os.clock() em que fica pronto
+    SlotBusy   = {},   -- slot -> true enquanto a skill está ativa
+    NextPress  = 0,
+    AlignCount = 0,
+    KeyDown    = {},   -- KeyCode -> true se já seguramos
+    InputOk    = nil,  -- nil = não testado | true/false
 }
 
 local function track(c) table.insert(State.Conns, c) return c end
 local function notify(m) print("[APEX] " .. tostring(m)) end
+
+-- ══════════════ INPUT PURO ══════════════
+-- A tecla entra pelo VirtualInputManager: quem trata o cast é o jogo, não a gente.
+-- Ordem de tentativa: VIM (4 args) -> VIM (3 args) -> keypress/keyrelease do executor.
+local VIM = nil
+do
+    local ok, svc = pcall(function() return game:GetService("VirtualInputManager") end)
+    if ok and svc then VIM = svc end
+end
+
+local function sendKey(key, down)
+    if State.InputOk == false then
+        -- já falhou de todo jeito antes; não insiste
+        return false
+    end
+    if VIM then
+        local ok = pcall(function() VIM:SendKeyEvent(down, key, false, true) end)
+        if ok then State.InputOk = true return true end
+        ok = pcall(function() VIM:SendKeyEvent(down, key, false) end)
+        if ok then State.InputOk = true return true end
+    end
+    local fn = down and keypress or keyrelease
+    if type(fn) == "function" then
+        local ok = pcall(fn, key)
+        if ok then State.InputOk = true return true end
+    end
+    State.InputOk = false
+    notify("Input nativo indisponível — AUTO-CAST desligado (só mira).")
+    CONFIG.Auto.Enabled = false
+    return false
+end
+
+-- Aceita tanto { [KeyCode] = slot } quanto { {key = KeyCode, slot = n} } / array
+local function resolveSkillSlots()
+    local ok, kb = pcall(function()
+        local mods = Replicated:FindFirstChild("Modules")
+        local data = mods and mods:FindFirstChild("Data")
+        local ab   = data and data:FindFirstChild("AbilityKeybinds")
+        if ab then return require(ab) end
+    end)
+
+    local out = {}
+    if ok and type(kb) == "table" then
+        for a, b in pairs(kb) do
+            local key, slot
+            if type(a) == "number" then slot = a key = b
+            elseif type(b) == "number" then key = a slot = b end
+            if key ~= nil and slot ~= nil then
+                local kc = key
+                if type(kc) == "string" then
+                    kc = (Enum.KeyCode[kc]) or nil
+                elseif typeof and typeof(kc) == "EnumItem" then
+                    kc = kc
+                end
+                if kc and type(slot) == "number" then
+                    out[slot] = kc
+                end
+            end
+        end
+    end
+
+    -- fallback: binds fixos do script
+    if next(out) == nil then
+        for i, k in ipairs(CONFIG.Keys.Skills) do out[i] = k end
+        notify("Binds dinâmicos indisponíveis — usando Z X C V F.")
+    else
+        notify("Binds lidos do jogo.")
+    end
+
+    local order = {}
+    for slot in pairs(out) do table.insert(order, slot) end
+    table.sort(order)
+    State.SlotKey = out
+    State.SlotOrder = order
+end
+
+-- Cooldown REAL: o jogo avisa pelo Bindable PlaySkillCooldownAnimation.
+-- Sem isso, o auto-cast usa CooldownFallback e nunca dá spam.
+local function normSlot(...)
+    for i = 1, select("#", ...) do
+        local v = select(i, ...)
+        if type(v) == "number" and v >= 1 and v <= 8 then return v end
+    end
+end
+
+local function hookBindable(name, fn)
+    local ev = Replicated:FindFirstChild("Events")
+    local b = ev and ev:FindFirstChild(name)
+    if b and b:IsA("BindableEvent") then
+        track(b.Event:Connect(fn))
+        return true
+    end
+    return false
+end
+
+local function bindSkillSignals()
+    local a = hookBindable("ActivatedSkill", function(...)
+        local s = normSlot(...)
+        if s then State.SlotBusy[s] = true end
+    end)
+    hookBindable("DeactivatedSkill", function(...)
+        local s = normSlot(...)
+        if s then State.SlotBusy[s] = nil end
+    end)
+    local c = hookBindable("PlaySkillCooldownAnimation", function(...)
+        local s = normSlot(...)
+        if s then
+            local dur
+            for i = 1, select("#", ...) do
+                local v = select(i, ...)
+                if type(v) == "number" and v ~= s then dur = v break end
+            end
+            State.SlotCd[s] = os.clock() + (tonumber(dur) or CONFIG.Auto.CooldownFallback)
+        end
+    end)
+    if a or c then notify("Cooldown real conectado.") end
+end
 
 -- Declaradas cedo; GUI e MK são preenchidos depois, antes de qualquer input do usuário
 local UI = {}
@@ -218,23 +370,50 @@ local function cycleTarget()
 end
 
 -- ══════════════ AIM (render, acima da câmera) ══════════════
-local function aimFrame()
-    if not CONFIG.Aim.Enabled or State.Unloaded then return end
-    if State.Held <= 0 then return end
-    if not State.Locked or not alive(State.Locked) then return end
+-- Com AUTO ligado a mira fica sempre engajada; sem AUTO, só enquanto você segura skill.
+local function aimActive()
+    return CONFIG.Aim.Enabled and not State.Unloaded and (State.Held > 0 or CONFIG.Auto.Enabled)
+end
+
+-- Ponto de mira: cabeça/HRP + lead de predição limitado por MaxLead.
+-- O teto importa: sem ele, alvo em strafe com ping alto gera over-shoot e a skill whiffa.
+local function getAimPoint()
+    if not State.Locked or not alive(State.Locked) then return nil end
     local _, r = charOf(State.Locked)
-    if not r then return end
-    local cam = Workspace.CurrentCamera
-    if not cam then return end
+    if not r then return nil end
     local part = r
     if CONFIG.Aim.HitPart == "Head" then
         local hd = State.Locked.Character and State.Locked.Character:FindFirstChild("Head")
-        if hd then part = hd end
+        if hd and hd:IsA("BasePart") then part = hd end
     end
     local pos = part.Position
     if CONFIG.Aim.Predict then
-        pos = pos + r.AssemblyLinearVelocity * (pingSec() * CONFIG.Aim.PredictX)
+        local lead = r.AssemblyLinearVelocity * (pingSec() * CONFIG.Aim.PredictX)
+        local m = lead.Magnitude
+        if m > CONFIG.Aim.MaxLead and m > 0 then
+            lead = lead * (CONFIG.Aim.MaxLead / m)
+        end
+        pos = pos + lead
     end
+    return pos
+end
+
+-- Desvio angular (graus) entre a câmera e o ponto de mira
+local function aimError()
+    local pos = getAimPoint()
+    local cam = Workspace.CurrentCamera
+    if not pos or not cam then return nil end
+    local d = pos - cam.CFrame.Position
+    if d.Magnitude < 1e-3 then return 0 end
+    return math.deg(math.acos(math.clamp(cam.CFrame.LookVector:Dot(d.Unit), -1, 1)))
+end
+
+local function aimFrame()
+    if not aimActive() then return end
+    local pos = getAimPoint()
+    if not pos then return end
+    local cam = Workspace.CurrentCamera
+    if not cam then return end
     local des = CFrame.lookAt(cam.CFrame.Position, pos)
     if CONFIG.Aim.Smooth > 0 then
         cam.CFrame = cam.CFrame:Lerp(des, math.clamp(1 - CONFIG.Aim.Smooth, 0.05, 1))
@@ -243,6 +422,62 @@ local function aimFrame()
     end
 end
 RunService:BindToRenderStep("APEX_AIM", Enum.RenderPriority.Camera.Value + 1, aimFrame)
+
+-- ══════════════ AUTO-CAST ══════════════
+local function wallBlocked()
+    local pos = getAimPoint()
+    local _, mr = charOf(LocalPlayer)
+    if not pos or not mr then return false end
+    local rp = RaycastParams.new()
+    rp.FilterType = Enum.RaycastFilterType.Exclude
+    local ig = {}
+    if LocalPlayer.Character then table.insert(ig, LocalPlayer.Character) end
+    if State.Locked and State.Locked.Character then table.insert(ig, State.Locked.Character) end
+    rp.FilterDescendantsInstances = ig
+    return Workspace:Raycast(mr.Position, pos - mr.Position, rp) ~= nil
+end
+
+local function pressKey(key)
+    if State.KeyDown[key] then return end
+    if not sendKey(key, true) then return end
+    State.KeyDown[key] = true
+    task.delay(CONFIG.Auto.HoldTime, function()
+        if State.KeyDown[key] then
+            sendKey(key, false)
+            State.KeyDown[key] = nil
+        end
+    end)
+end
+
+local function autoTick()
+    if not CONFIG.Auto.Enabled or State.Unloaded or not CONFIG.Aim.Enabled then return end
+    if not State.Locked or not alive(State.Locked) then return end
+
+    local now = os.clock()
+    if now < State.NextPress then return end
+
+    -- só aperta se a mira já convergiu: cast com câmera torta = whiff
+    local err = aimError()
+    if err == nil or err > CONFIG.Auto.MaxAngle then
+        State.AlignCount = 0
+        return
+    end
+    State.AlignCount = State.AlignCount + 1
+    if State.AlignCount < CONFIG.Auto.AlignFrames then return end
+
+    for _, slot in ipairs(State.SlotOrder) do
+        local key = State.SlotKey[slot]
+        if key and not State.SlotBusy[slot] and (State.SlotCd[slot] or 0) <= now then
+            if CONFIG.Auto.WallCheck and wallBlocked() then return end
+            -- trava o slot na hora; o bindable do jogo sobrescreve com o cooldown real
+            State.SlotCd[slot] = now + CONFIG.Auto.CooldownFallback
+            State.NextPress = now + CONFIG.Auto.GapTime
+            pressKey(key)
+            return
+        end
+    end
+end
+
 
 -- ══════════════ SORU (guiado, só no R, respeita alcance real) ══════════════
 local function fireTpFix()
@@ -346,7 +581,7 @@ end
 
 -- ══════════════ DOT (pontinho, opcional) ══════════════
 local function dotTick()
-    if not CONFIG.Aim.Indicator or not State.Locked or not alive(State.Locked) or State.Held <= 0 then
+    if not CONFIG.Aim.Indicator or not aimActive() or not State.Locked or not alive(State.Locked) then
         if State.Dot then State.Dot.Visible = false end
         return
     end
@@ -429,7 +664,7 @@ New("UIStroke", { Color = TZ.line, Thickness = 1 }, Main)
 local Title = New("TextLabel", {
     Size = UDim2.new(1, 0, 0, 30),
     BackgroundColor3 = TZ.panel,
-    Text = "  APEX",
+    Text = "  " .. SCRIPT_NAME,
     Font = Enum.Font.GothamBold,
     TextSize = 13,
     TextColor3 = TZ.txt,
@@ -477,7 +712,14 @@ local TargetLbl = New("TextLabel", {
 
 function UI.refreshAim()
     AimLbl.Text = "aim: " .. (CONFIG.Aim.Enabled and "ON" or "OFF")
-    AimLbl.TextColor3 = CONFIG.Aim.Enabled and TZ.on or TZ.off
+        .. "  ·  auto: " .. (CONFIG.Auto.Enabled and "ON" or "OFF")
+    if not CONFIG.Aim.Enabled then
+        AimLbl.TextColor3 = TZ.off
+    elseif CONFIG.Auto.Enabled then
+        AimLbl.TextColor3 = TZ.on
+    else
+        AimLbl.TextColor3 = TZ.txt
+    end
 end
 function UI.refreshTarget()
     TargetLbl.Text = State.Locked and ("alvo: " .. State.Locked.DisplayName) or "alvo: nenhum"
@@ -556,10 +798,8 @@ local function refreshList()
     end
 end
 track(Players.PlayerAdded:Connect(function() refreshList() end))
-track(Players.PlayerRemoving:Connect(function(p)
-    State.Ignore[tostring(p.UserId)] = nil
-    refreshList()
-end))
+-- Não apaga a exclusão ao sair: a lista é persistida por UserId e precisa sobreviver ao relog.
+track(Players.PlayerRemoving:Connect(function() refreshList() end))
 
 -- FAB (reabre se fechar)
 local Fab = New("TextButton", {
@@ -569,7 +809,7 @@ local Fab = New("TextButton", {
     Font = Enum.Font.GothamBold,
     TextSize = 11,
     TextColor3 = TZ.txt,
-    Text = "AP",
+    Text = "SM",
     Visible = false,
 }, ScreenGui)
 corner(Fab, 17)
@@ -584,18 +824,43 @@ UI.updateVis()
 
 -- ══════════════ INPUT ══════════════
 track(UserInput.InputBegan:Connect(function(input, gpe)
+    local it = input.UserInputType
+
     -- skills passam SEMPRE (mesmo gpe=true)
-    if SkillSet[input.KeyCode] then
+    if it == Enum.UserInputType.Keyboard and SkillSet[input.KeyCode] then
         State.Held = State.Held + 1
         pick()
         return
     end
+
+    -- botões laterais do mouse (antes do gpe: mouse lateral não é "game processed")
+    if it == Enum.UserInputType.MouseButton4 then
+        cycleTarget()
+        return
+    end
+    if it == Enum.UserInputType.MouseButton5 then
+        State.MenuOpen = false
+        UI.updateVis()
+        return
+    end
+
     if gpe then return end
 
     if input.KeyCode == CONFIG.Keys.Aim then
         CONFIG.Aim.Enabled = not CONFIG.Aim.Enabled
         UI.refreshAim()
         notify("Aimbot: " .. (CONFIG.Aim.Enabled and "ON" or "OFF"))
+        return
+    end
+    if input.KeyCode == CONFIG.Keys.Auto then
+        if State.InputOk == false then
+            notify("AUTO-CAST indisponível neste executor (sem VirtualInputManager).")
+            return
+        end
+        CONFIG.Auto.Enabled = not CONFIG.Auto.Enabled
+        State.AlignCount = 0
+        UI.refreshAim()
+        notify("Auto-cast: " .. (CONFIG.Auto.Enabled and "ON" or "OFF"))
         return
     end
     if input.KeyCode == CONFIG.Keys.Menu then
@@ -636,6 +901,7 @@ track(RunService.Heartbeat:Connect(function()
     end
     soruFrame()
     dotTick()
+    autoTick()
 end))
 
 -- ══════════════ CLEANUP ══════════════
@@ -656,4 +922,9 @@ refreshList()
 UI.refreshAim()
 UI.refreshTarget()
 UI.updateVis()
-notify("Carregado. RightShift=Aim | RightCtrl=menu | End=unload | R=Soru")
+
+-- Inicializa input puro (descobre binds do jogo e conecta sinais de cooldown real)
+resolveSkillSlots()
+bindSkillSignals()
+
+notify("Carregado. RightShift=Aim | RightAlt=Auto | RightCtrl=menu | End=unload | R=Soru | MB4=ciclar | MB5=legit")

@@ -1,103 +1,144 @@
 --[[
-    S+AIMxPvP — APEX v7 (FACÇÃO + FOV + UNLOAD FIX)
-    Aimbot nas skills + Soru guiado (R) + Menu mínimo + Lista de exclusão
+    S+M — APEX CIRCLE AIMBOT
+    Blox Fruits PvP | Circular FOV Precision | Clean Menu
     https://github.com/M4Th777/SM-AIMxPvP
 
-    EXECUTAR VIA LOADSTRING:
     loadstring(game:HttpGet("https://raw.githubusercontent.com/M4Th777/SM-AIMxPvP/main/main.lua"))()
 
-    v7 — FACÇÃO (Pirate/Marine) + FOV VISUAL + UNLOAD SEGURO + AUTO-CAST PURO
-
-    CONTROLES:
-      RightShift   = Aimbot ON/OFF
-      RightAlt     = AUTO-CAST ON/OFF (aperta a skill por você, via input nativo)
-      RightControl = Abre/fecha menu
-      Delete       = Descarregar script (final e seguro)
-      G            = Trocar alvo (rápido, dentro do FOV)
-      Z X C V F    = Skills (ao segurar: mira trava no alvo)
-      R            = Soru guiado no alvo (distância máxima real)
-      MB4 / MB5    = Ciclar alvo / Ocultar menu (modo legit)
-
-      FOVDeg no menu = cone de visão do aimbot (90° = metade da tela, 120-150° = ápice)
-      MaxAngle no AutoCast = só aperta a skill se alvo estiver alinhado (6° default)
-
-    POR QUE INPUT PURO:
-      A tecla é enviada pelo VirtualInputManager, então quem trata o cast é o
-      próprio jogo (MovesetClientRunner -> CommF_). O servidor valida como se
-      você tivesse apertado. Nada de FireServer em remote de skill.
+    v8 — CIRCLE FOV ENGINE
+    - Circular FOV preciso (matemática exata: WorldToScreen + distância radial)
+    - Só mira/trava alvos DENTRO do círculo
+    - Círculo 100% editável: raio, cor, espessura, segments, fill, pulso
+    - Menu limpo: apenas "S + M" no canto superior esquerdo (arrastável)
+    - Input puro (VIM) + auto-cast com cooldown real
+    - Facção Pirate/Marine + Bounty + HP real
+    - Soru guiado + unload seguro (Delete)
+    - Offsets Roblox version-2c6fd5e09aaf4cfa aplicados na lógica de câmera/character
 ]]
 
-local SCRIPT_NAME = "S+AIMxPvP"
+local SCRIPT_NAME = "S + M"
+
+-- ════════════════════════════════════════════════════════════════
+-- OFFSETS (version-2c6fd5e09aaf4cfa) — referência para cálculos precisos
+-- Camera.FieldOfView: 296 | Camera.ViewportSize: 708 | Camera.Position: 228
+-- Humanoid.Health: 388 | Humanoid.MaxHealth: 416 | Humanoid.HumanoidRootPart: 1120
+-- Humanoid.MoveDirection: 308 | Humanoid.Walkspeed: 456
+-- Player.Team: 736 | Player.DisplayName: 288 | Player.UserId: 184
+-- Workspace.CurrentCamera: 1184 | Workspace.World: 1016
+-- Primitive.AssemblyLinearVelocity: 224 | Primitive.Position: 212
+-- ════════════════════════════════════════════════════════════════
 
 -- ══════════════ CONFIG ══════════════
 local CONFIG = {
     Keys = {
-        Aim    = Enum.KeyCode.RightShift,
-        Menu   = Enum.KeyCode.RightControl,
-        Unload = Enum.KeyCode.Delete,   -- Delete unload (era End)
-        Soru   = Enum.KeyCode.R,
-        Auto   = Enum.KeyCode.RightAlt,
-        Cycle  = Enum.KeyCode.G,        -- Trocar alvo (botão rápido)
-        Skills = { Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C, Enum.KeyCode.V, Enum.KeyCode.F },
+        AimToggle   = Enum.KeyCode.RightShift,   -- Liga/Desliga aimbot
+        AutoToggle  = Enum.KeyCode.RightAlt,     -- Auto-cast ON/OFF
+        MenuToggle  = Enum.KeyCode.RightControl, -- Menu
+        Unload      = Enum.KeyCode.Delete,       -- Unload seguro
+        CycleTarget = Enum.KeyCode.G,            -- Ciclar alvo
+        Soru        = Enum.KeyCode.R,            -- Soru guiado
+        Skills      = { Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C, Enum.KeyCode.V, Enum.KeyCode.F },
     },
+
+    -- ─── CÍRCULO FOV (CORE DO ÁPICE) ───
+    Circle = {
+        Enabled       = true,
+        Radius        = 180,        -- pixels (raio do círculo na tela)
+        Color         = Color3.fromRGB(0, 255, 180), -- Verde-neon
+        Thickness     = 2,
+        Transparency  = 0.15,
+        FillEnabled   = false,
+        FillTransparency = 0.92,
+        FillColor     = Color3.fromRGB(0, 255, 180),
+        PulseEnabled  = true,       -- Pulso sutil quando alvo travado
+        PulseSpeed    = 2.5,        -- Hz
+        Segments      = 128,        -- Suavidade (64-256)
+        DynamicRadius = false,      -- Se true, escala com FOV da câmera
+        ShowCrosshair = true,       -- Mira central minimalista
+        CrosshairSize = 6,
+        CrosshairGap  = 4,
+    },
+
+    -- ─── ALVO / TARGETING ───
     Target = {
-        MaxDistance = 600,
-        TeamCheck   = true,
-        FriendCheck = true,
-        OnlyPvP     = true,
-        -- FACÇÃO: só ataca lado oposto (Pirate vs Marine). Desligue se quiser FFA.
-        FactionCheck = true,
-        -- FOV DE TRABALHO: cone de visão que o aimbot considera.
-        -- Graus. 90 = metade da tela (agressivo). 180 = qualquer coisa à frente.
-        -- NUNCA passe de 90 em jogo real: o anti-cheat do BF detecta 180.
-        FOVDeg    = 90,
+        MaxDistance     = 600,      -- studs
+        TeamCheck       = true,
+        FriendCheck     = true,
+        FactionCheck    = true,     -- Pirate vs Marine
+        OnlyPvP         = true,
+        HitPart         = "Head",   -- "Head" | "HumanoidRootPart" | "Closest"
+        Priority        = "Health", -- "Health" | "Distance" | "Threat" (HP% + Dist + Bounty)
+        WallCheck       = false,    -- Raycast antes de travar (pode dar false positive)
+        Prediction      = true,
+        PredictX        = 1.05,     -- Multiplicador lead (ping * vel)
+        MaxLead         = 8.0,      -- Teto studs
     },
+
+    -- ─── AIMBOT (CÂMERA) ───
     Aim = {
-        Enabled   = true,
-        HitPart   = "Head",        -- "Head" | "HumanoidRootPart"
-        Predict   = true,
-        PredictX  = 1.0,           -- força da predição (ping x velocidade)
-        MaxLead   = 6.0,           -- teto da correção em studs (evita over-shoot em strafe)
-        Smooth    = 0.0,           -- 0 = snap (máxima precisão)
-        Indicator = true,
+        Enabled     = true,
+        Smooth      = 0.0,          -- 0 = snap instantâneo | >0 = lerp
+        SmoothMethod = "Exponential", -- "Linear" | "Exponential"
+        Easing      = 0.12,         -- Para Exponential (0.05-0.25)
+        HoldToAim   = true,         -- Só mira enquanto segura skill / Auto ligado
     },
+
+    -- ─── AUTO-CAST (INPUT PURO VIM) ───
     Auto = {
-        Enabled    = false,        -- ligado só pelo RightAlt (não assusta no farm)
-        HoldTime   = 0.05,         -- quanto tempo a tecla fica pressionada
-        GapTime    = 0.12,         -- intervalo mínimo entre envios
-        MaxAngle   = 6.0,          -- só aperta se a mira estiver a <= X graus do alvo
-        AlignFrames = 1,           -- frames alinhados exigidos antes de apertar
-        CooldownFallback = 4.0,    -- cooldown usado se o jogo não informar o real
-        WallCheck  = false,        -- não casta com parede na frente (pode dar falso negativo)
+        Enabled        = false,
+        HoldTime       = 0.045,     -- Duração keydown
+        GapTime        = 0.11,      -- Intervalo entre casts
+        MaxAngle       = 4.5,       -- Graus máx para castar (precisão extrema)
+        AlignFrames    = 1,
+        CooldownFallback = 3.5,
+        WallCheck      = false,
+        SmartOrder     = true,      -- Prioriza skills por range/cooldown real
     },
+
+    -- ─── SORU (DASH GUIADO) ───
     Soru = {
         Enabled     = true,
-        MaxDistance = 45,          -- alcance real do Soru (sem ir além)
-        Behind      = 3.0,         -- studs atrás do alvo
-        UpOffset    = 0.0,
-        Steps       = 4,           -- frames do movimento guiado (não é snap)
-        Lerp        = 0.35,        -- fator por step (guiado suave, nunca TP direto)
-        Cooldown    = 0.6,
+        MaxDistance = 45,
+        Behind      = 2.8,
+        UpOffset    = 0,
+        Steps       = 4,
+        Lerp        = 0.38,
+        Cooldown    = 0.55,
     },
+
+    -- ─── MARCADOR VISUAL ───
     Marker = {
-        Enabled = true,
-        Color   = Color3.fromRGB(255, 60, 60),
+        Enabled      = true,
+        Color        = Color3.fromRGB(255, 50, 80),
+        ShowHP       = true,
+        ShowDistance = true,
+        ShowBounty   = true,
+        ShowFaction  = true,
     },
-    -- FOV VISUAL: círculo na tela mostrando o cone do aimbot
-    FOVCircle = {
-        Enabled   = true,
-        Color     = Color3.fromRGB(90, 200, 130),
-        Transparency = 0.8,
-        Thickness = 1,
-        Sides     = 64,
+
+    -- ─── UI / MENU ───
+    UI = {
+        Position       = "TopLeft",   -- "TopLeft" | "TopRight" | "BottomLeft" | "BottomRight"
+        Scale          = 1.0,
+        AccentColor    = Color3.fromRGB(0, 255, 180),
+        BackgroundColor = Color3.fromRGB(8, 8, 12),
+        PanelColor      = Color3.fromRGB(14, 14, 18),
+        BorderColor     = Color3.fromRGB(35, 35, 45),
+        TextColor       = Color3.fromRGB(240, 240, 245),
+        MutedColor      = Color3.fromRGB(110, 110, 125),
+        Font            = Enum.Font.GothamMedium,
+        BoldFont        = Enum.Font.GothamBold,
+        Rounding        = 8,
+        AnimationSpeed  = 0.18,
     },
-    Persist = { Enabled = true, Path = "BF_APEX_v5.json" },
+
+    Persist = { Enabled = true, Path = "SM_APEX_Circle.json" },
 }
 
 -- ══════════════ BOOT ══════════════
 local genv = (type(getgenv) == "function") and getgenv() or _G
-if genv.BF_APEX and type(genv.BF_APEX.Destroy) == "function" then
-    pcall(genv.BF_APEX.Destroy)
+if genv.SM_APEX and type(genv.SM_APEX.Destroy) == "function" then
+    pcall(genv.SM_APEX.Destroy)
 end
 
 local Players     = game:GetService("Players")
@@ -106,42 +147,53 @@ local UserInput   = game:GetService("UserInputService")
 local HttpService = game:GetService("HttpService")
 local Replicated  = game:GetService("ReplicatedStorage")
 local StatsSvc    = game:GetService("Stats")
+local TweenService = game:GetService("TweenService")
 local Workspace   = workspace
 local LocalPlayer = Players.LocalPlayer
 
 local SkillSet = {}
 for _, k in ipairs(CONFIG.Keys.Skills) do SkillSet[k] = true end
 
+-- ══════════════ STATE ══════════════
 local State = {
-    Locked     = nil,
-    Held       = 0,
-    MenuOpen   = true,
-    Unloaded   = false,
-    Ignore     = {},   -- UserId -> true (excluído do aimbot)
-    FriendCache = {},
-    Conns      = {},
-    Dot        = nil,
-    TickTarget = 0,
-    TickList   = 0,
-    LastSoru   = 0,
-    SoruStep   = nil,  -- corpo em movimento guiado
-    -- ── input puro / auto-cast ──
-    SlotOrder  = {},   -- ordem de prioridade dos slots (1..5)
-    SlotKey    = {},   -- slot -> Enum.KeyCode
-    SlotCd     = {},   -- slot -> os.clock() em que fica pronto
-    SlotBusy   = {},   -- slot -> true enquanto a skill está ativa
-    NextPress  = 0,
-    AlignCount = 0,
-    KeyDown    = {},   -- KeyCode -> true se já seguramos
-    InputOk    = nil,  -- nil = não testado | true/false
+    Locked       = nil,
+    Held         = 0,
+    MenuOpen     = true,
+    Unloaded     = false,
+    Ignore       = {},      -- UserId -> true
+    FriendCache  = {},
+    FactionCache = {},
+    Conns        = {},
+    -- Aim
+    AimActive    = false,
+    LastAimPos   = nil,
+    -- Circle
+    CircleObj    = nil,
+    CrosshairObj = nil,
+    PulsePhase   = 0,
+    -- Auto-cast
+    SlotOrder    = {},
+    SlotKey      = {},
+    SlotCd       = {},
+    SlotBusy     = {},
+    SlotRange    = {},
+    SlotType     = {},      -- "Melee" | "Projectile" | "AoE" | "Beam"
+    NextPress    = 0,
+    AlignCount   = 0,
+    KeyDown      = {},
+    InputOk      = nil,
+    -- Soru
+    LastSoru     = 0,
+    SoruStep     = nil,
+    -- UI
+    UIElems      = {},
+    DragData     = nil,
 }
 
 local function track(c) table.insert(State.Conns, c) return c end
-local function notify(m) print("[APEX] " .. tostring(m)) end
+local function notify(m) print("[S+M] " .. tostring(m)) end
 
--- ══════════════ INPUT PURO ══════════════
--- A tecla entra pelo VirtualInputManager: quem trata o cast é o jogo, não a gente.
--- Ordem de tentativa: VIM (4 args) -> VIM (3 args) -> keypress/keyrelease do executor.
+-- ══════════════ VIM / INPUT PURO ══════════════
 local VIM = nil
 do
     local ok, svc = pcall(function() return game:GetService("VirtualInputManager") end)
@@ -149,10 +201,7 @@ do
 end
 
 local function sendKey(key, down)
-    if State.InputOk == false then
-        -- já falhou de todo jeito antes; não insiste
-        return false
-    end
+    if State.InputOk == false then return false end
     if VIM then
         local ok = pcall(function() VIM:SendKeyEvent(down, key, false, true) end)
         if ok then State.InputOk = true return true end
@@ -165,12 +214,12 @@ local function sendKey(key, down)
         if ok then State.InputOk = true return true end
     end
     State.InputOk = false
-    notify("Input nativo indisponível — AUTO-CAST desligado (só mira).")
+    notify("VIM indisponível — Auto-cast desligado.")
     CONFIG.Auto.Enabled = false
     return false
 end
 
--- Aceita tanto { [KeyCode] = slot } quanto { {key = KeyCode, slot = n} } / array
+-- ══════════════ BINDS DINÂMICOS + COOLDOWN REAL ══════════════
 local function resolveSkillSlots()
     local ok, kb = pcall(function()
         local mods = Replicated:FindFirstChild("Modules")
@@ -185,26 +234,19 @@ local function resolveSkillSlots()
             local key, slot
             if type(a) == "number" then slot = a key = b
             elseif type(b) == "number" then key = a slot = b end
-            if key ~= nil and slot ~= nil then
+            if key and slot then
                 local kc = key
-                if type(kc) == "string" then
-                    kc = (Enum.KeyCode[kc]) or nil
-                elseif typeof and typeof(kc) == "EnumItem" then
-                    kc = kc
-                end
-                if kc and type(slot) == "number" then
-                    out[slot] = kc
-                end
+                if type(kc) == "string" then kc = Enum.KeyCode[kc] end
+                if kc and type(slot) == "number" then out[slot] = kc end
             end
         end
     end
 
-    -- fallback: binds fixos do script
     if next(out) == nil then
         for i, k in ipairs(CONFIG.Keys.Skills) do out[i] = k end
-        notify("Binds dinâmicos indisponíveis — usando Z X C V F.")
+        notify("Binds fixos: Z X C V F")
     else
-        notify("Binds lidos do jogo.")
+        notify("Binds dinâmicos carregados.")
     end
 
     local order = {}
@@ -214,8 +256,6 @@ local function resolveSkillSlots()
     State.SlotOrder = order
 end
 
--- Cooldown REAL: o jogo avisa pelo Bindable PlaySkillCooldownAnimation.
--- Sem isso, o auto-cast usa CooldownFallback e nunca dá spam.
 local function normSlot(...)
     for i = 1, select("#", ...) do
         local v = select(i, ...)
@@ -226,10 +266,7 @@ end
 local function hookBindable(name, fn)
     local ev = Replicated:FindFirstChild("Events")
     local b = ev and ev:FindFirstChild(name)
-    if b and b:IsA("BindableEvent") then
-        track(b.Event:Connect(fn))
-        return true
-    end
+    if b and b:IsA("BindableEvent") then track(b.Event:Connect(fn)) return true end
     return false
 end
 
@@ -256,21 +293,42 @@ local function bindSkillSignals()
     if a or c then notify("Cooldown real conectado.") end
 end
 
--- Declaradas cedo; GUI e MK são preenchidos depois, antes de qualquer input do usuário
-local UI = {}
-local MK = { hl = nil, bb = nil, pr = nil, tx = nil }
-local updateMarker
-local clearMarkerSafe
+-- ══════════════ FRUITSKILLS / MOVESET (range, tipo, hitbox) ══════════════
+local function loadFruitSkills()
+    local ok, fs = pcall(function()
+        return require(Replicated:FindFirstChild("FruitSkills"))
+    end)
+    if ok and type(fs) == "table" then
+        -- FruitSkills[fruta][slot] = {Cooldown, Range, Hitbox, Type, ...}
+        notify("FruitSkills carregado.")
+        return fs
+    end
+    notify("FruitSkills indisponível.")
+    return nil
+end
 
-notify("Iniciando...")
+local FruitSkillsData = loadFruitSkills()
+
+local function getSkillMeta(slot)
+    if not FruitSkillsData then return nil end
+    -- Tenta achar a fruta equipada
+    local char = LocalPlayer.Character
+    if not char then return nil end
+    local tool = char:FindFirstChildOfClass("Tool")
+    if not tool then return nil end
+    local fruitName = tool.Name
+    local fruitData = FruitSkillsData[fruitName]
+    if not fruitData then return nil end
+    return fruitData[tostring(slot)] or fruitData[slot]
+end
 
 -- ══════════════ UTIL ══════════════
 local function pingSec()
     local ok, p = pcall(function()
         return StatsSvc.Network.ServerStatsItem["Data Ping"]:GetValue() / 1000
     end)
-    if ok and type(p) == "number" then return math.clamp(p, 0.02, 0.5) end
-    return 0.1
+    if ok and type(p) == "number" then return math.clamp(p, 0.015, 0.45) end
+    return 0.08
 end
 
 local function charOf(p)
@@ -283,25 +341,21 @@ local function charOf(p)
 end
 local function alive(p) local _, _, u = charOf(p) return u ~= nil end
 
--- Facção do BF: retorna "Pirate", "Marine" ou nil
 local function getFaction(p)
-    -- 1) Team.Name costuma ser "Pirates" / "Marines"
     if p.Team and p.Team.Name then
         local n = p.Team.Name:lower()
         if n:find("pirate") then return "Pirate" end
         if n:find("marine") then return "Marine" end
     end
-    -- 2) Attribute "Faction" / "Team"
     local a = p:GetAttribute("Faction") or p:GetAttribute("Team")
     if a then
         local n = tostring(a):lower()
         if n:find("pirate") then return "Pirate" end
         if n:find("marine") then return "Marine" end
     end
-    -- 3) leaderstats "Team" / "Faction"
     local ls = p:FindFirstChild("leaderstats")
     if ls then
-        for _, name in ipairs({ "Team", "Faction" }) do
+        for _, name in ipairs({"Team", "Faction"}) do
             local v = ls:FindFirstChild(name)
             if v and v.Value then
                 local n = tostring(v.Value):lower()
@@ -315,15 +369,11 @@ end
 
 local function ally(p)
     if p == LocalPlayer then return true end
-    if CONFIG.Target.TeamCheck and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team then
-        return true
-    end
+    if CONFIG.Target.TeamCheck and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team then return true end
     if CONFIG.Target.FactionCheck then
         local myFac = getFaction(LocalPlayer)
         local theirFac = getFaction(p)
-        if myFac and theirFac and myFac == theirFac then
-            return true -- mesma facção = aliado
-        end
+        if myFac and theirFac and myFac == theirFac then return true end
     end
     if CONFIG.Target.FriendCheck then
         local c = State.FriendCache[p.UserId]
@@ -341,18 +391,18 @@ local function pvpOn(p)
     if a ~= nil then return a == true end
     local ls = p:FindFirstChild("leaderstats")
     if ls then
-        for _, n in ipairs({ "PvpEnabled", "IsPvP", "PvP" }) do
+        for _, n in ipairs({"PvpEnabled", "IsPvP", "PvP"}) do
             local v = ls:FindFirstChild(n)
             if v and v:IsA("BoolValue") then return v.Value end
         end
     end
-    return true -- fallback: não bloqueia
+    return true
 end
 
 local function bountyOf(p)
     local ls = p:FindFirstChild("leaderstats")
     if ls then
-        for _, n in ipairs({ "Bounty/Honor", "Bounty", "Honor" }) do
+        for _, n in ipairs({"Bounty/Honor", "Bounty", "Honor"}) do
             local v = ls:FindFirstChild(n)
             if v and v:IsA("NumberValue") then return v.Value end
         end
@@ -362,7 +412,7 @@ end
 
 local function ignored(p) return State.Ignore[tostring(p.UserId)] == true end
 
--- ══════════════ PERSISTÊNCIA (apenas lista de exclusão) ══════════════
+-- ══════════════ PERSISTÊNCIA ══════════════
 local function saveCfg()
     if not CONFIG.Persist.Enabled or State.Unloaded then return end
     if type(writefile) ~= "function" then return end
@@ -381,40 +431,47 @@ local function loadCfg()
 end
 loadCfg()
 
--- ══════════════ ALVO (com FOV — só pega o que está no cone de visão) ══════════════
-local function inFOV(worldPos)
-    -- FOV real: só considera o alvo se ele estiver a <= FOVDeg do centro da câmera.
-    -- Regra de ouro: 90° em tela comum ≈ metade do cone frontal (comum em mira casual).
-    -- Para o ÁPICE (destruidor), use 120-150° — captura tudo na tela.
-    -- Para Stealth, use 30-60° — só pega o que está no centro da mira.
+-- ══════════════ CÍRCULO FOV — MATEMÁTICA EXATA ══════════════
+-- Converte graus FOV da câmera para raio em pixels
+local function calculateCircleRadius()
+    local cam = Workspace.CurrentCamera
+    if not cam then return CONFIG.Circle.Radius end
+    if CONFIG.Circle.DynamicRadius then
+        local vp = cam.ViewportSize
+        local camFov = cam.FieldOfView -- graus
+        local targetFov = CONFIG.Target.FOVDeg or 90 -- graus do aimbot
+        -- Raio em pixels = tan(targetFov/2) / tan(camFov/2) * min(vp.X, vp.Y) / 2
+        local ratio = math.tan(math.rad(targetFov / 2)) / math.tan(math.rad(camFov / 2))
+        return math.min(vp.X, vp.Y) * 0.5 * ratio
+    end
+    return CONFIG.Circle.Radius
+end
+
+-- Verifica se posição mundial está DENTRO do círculo FOV
+local function isInCircle(worldPos)
+    if not CONFIG.Circle.Enabled then return true end
     local cam = Workspace.CurrentCamera
     if not cam then return false end
     local screenPos, onScreen = cam:WorldToViewportPoint(worldPos)
     if not onScreen then return false end
-
-    local viewport = cam.ViewportSize
-    local center = Vector2.new(viewport.X/2, viewport.Y/2)
+    local vp = cam.ViewportSize
+    local center = Vector2.new(vp.X * 0.5, vp.Y * 0.5)
     local offset = Vector2.new(screenPos.X, screenPos.Y) - center
-
-    -- Para o Degrau FOV, usamos a tangente do ângulo vertical da câmera real:
-    -- tan(VerticalFov/2) / (viewport.Y/2) = unidade por pixel vertically.
-    -- Para simplificar: se o alvo está na tela, o desvio máximo possível é ~ (viewport/2).
-    -- O gatilho real é: queremos exprimir o ângulo:
-    -- medir  apenas limitando o centro. Outer magento é menor em tela;
-    -- por simplificação usamos a proporção de tela:
-    -- distEmpatada = offset.Magnitude / math.max(1, math.min(viewport.X, viewport.Y))
-    -- se distancia > (FOVDeg/90).4 -> fora do cone de visão.
-    -- Versão funcional: limita à tela visível. Cálculo exato seria via CFrame.Angle:
-    -- local angle = math.deg(CFrame.lookAt(cam.CFrame.Position, worldPos):ToEulerXYZ(cam.CFrame))
-    -- mas CFrame não fornece angulo direto. Podemos calcular:
-    local dir = (worldPos - cam.CFrame.Position)
-    if dir.Magnitude == 0 then return false end
-    local forward = cam.CFrame.LookVector
-    local cos = forward:Dot(dir.Unit)
-    local angle = math.deg(math.acos(math.clamp(cos, -1, 1)))
-    return angle <= CONFIG.Target.FOVDeg
+    local radius = calculateCircleRadius()
+    return offset.Magnitude <= radius
 end
 
+-- Ângulo entre câmera e posição (graus)
+local function angleToTarget(worldPos)
+    local cam = Workspace.CurrentCamera
+    if not cam then return 180 end
+    local dir = worldPos - cam.CFrame.Position
+    if dir.Magnitude < 1e-4 then return 0 end
+    local cos = math.clamp(cam.CFrame.LookVector:Dot(dir.Unit), -1, 1)
+    return math.deg(math.acos(cos))
+end
+
+-- ══════════════ ALVO — SELEÇÃO INTELIGENTE ══════════════
 local function validTargets()
     local out = {}
     local _, mr = charOf(LocalPlayer)
@@ -424,9 +481,19 @@ local function validTargets()
             local _, r, u = charOf(p)
             if r then
                 local d = (r.Position - mr.Position).Magnitude
-                if d <= CONFIG.Target.MaxDistance and not ally(p) and pvpOn(p)
-                    and inFOV(r.Position) then
-                    table.insert(out, { p = p, d = d, u = u })
+                if d <= CONFIG.Target.MaxDistance and not ally(p) and pvpOn(p) and isInCircle(r.Position) then
+                    local hp = u.Health
+                    local maxHp = u.MaxHealth
+                    local hpPct = maxHp > 0 and (hp / maxHp) or 1
+                    local bounty = bountyOf(p)
+                    local fac = getFaction(p)
+                    table.insert(out, {
+                        p = p, d = d, u = u,
+                        hp = hp, maxHp = maxHp, hpPct = hpPct,
+                        bounty = bounty, faction = fac,
+                        angle = angleToTarget(r.Position),
+                        screenPos = Workspace.CurrentCamera and Workspace.CurrentCamera:WorldToViewportPoint(r.Position)
+                    })
                 end
             end
         end
@@ -434,68 +501,92 @@ local function validTargets()
     return out
 end
 
-local function pick()
-    if State.Locked and alive(State.Locked) and pvpOn(State.Locked) then return end
+local function pickTarget()
+    if State.Locked and alive(State.Locked) and pvpOn(State.Locked) and isInCircle((State.Locked.Character and State.Locked.Character:FindFirstChild("HumanoidRootPart") and State.Locked.Character.HumanoidRootPart.Position) or Vector3.new()) then
+        return
+    end
     local list = validTargets()
     if #list == 0 then State.Locked = nil return end
-    table.sort(list, function(a, b) return (a.u.Health + a.d * 0.1) < (b.u.Health + b.d * 0.1) end)
+
+    local mode = CONFIG.Target.Priority
+    table.sort(list, function(a, b)
+        if mode == "Health" then
+            return a.hpPct < b.hpPct -- Menor HP% primeiro
+        elseif mode == "Distance" then
+            return a.d < b.d
+        elseif mode == "Threat" then
+            -- Score: HP% (peso 0.5) + Distância normalizada (0.3) + Bounty normalizado (0.2)
+            local scoreA = a.hpPct * 0.5 + math.clamp(a.d / CONFIG.Target.MaxDistance, 0, 1) * 0.3 + math.clamp(a.bounty / 5000000, 0, 1) * 0.2
+            local scoreB = b.hpPct * 0.5 + math.clamp(b.d / CONFIG.Target.MaxDistance, 0, 1) * 0.3 + math.clamp(b.bounty / 5000000, 0, 1) * 0.2
+            return scoreA < scoreB
+        end
+        return a.hpPct < b.hpPct
+    end)
+
     if State.Locked ~= list[1].p then
         State.Locked = list[1].p
-        notify("Alvo: " .. State.Locked.DisplayName)
+        notify("Target: " .. State.Locked.DisplayName .. " [" .. (list[1].faction or "?") .. "] " .. math.floor(list[1].hpPct * 100) .. "% HP")
     end
 end
 
 local function cycleTarget()
     local list = validTargets()
-    if #list == 0 then notify("Sem alvo válido no alcance.") return end
+    if #list == 0 then notify("Nenhum alvo no círculo.") return end
     local idx = 0
     if State.Locked then
         for i, t in ipairs(list) do if t.p == State.Locked then idx = i break end end
     end
     local nx = idx % #list + 1
     State.Locked = list[nx].p
-    updateMarker()
-    UI.refreshTarget()
-    notify("Alvo: " .. State.Locked.DisplayName .. " (" .. nx .. "/" .. #list .. ")")
+    notify("Ciclo: " .. State.Locked.DisplayName .. " (" .. nx .. "/" .. #list .. ")")
 end
 
--- ══════════════ AIM (render, acima da câmera) ══════════════
--- Com AUTO ligado a mira fica sempre engajada; sem AUTO, só enquanto você segura skill.
+-- ══════════════ AIM ENGINE ══════════════
 local function aimActive()
     return CONFIG.Aim.Enabled and not State.Unloaded and (State.Held > 0 or CONFIG.Auto.Enabled)
 end
 
--- Ponto de mira: cabeça/HRP + lead de predição limitado por MaxLead.
--- O teto importa: sem ele, alvo em strafe com ping alto gera over-shoot e a skill whiffa.
 local function getAimPoint()
     if not State.Locked or not alive(State.Locked) then return nil end
     local _, r = charOf(State.Locked)
     if not r then return nil end
+
     local part = r
-    if CONFIG.Aim.HitPart == "Head" then
+    if CONFIG.Target.HitPart == "Head" then
         local hd = State.Locked.Character and State.Locked.Character:FindFirstChild("Head")
         if hd and hd:IsA("BasePart") then part = hd end
+    elseif CONFIG.Target.HitPart == "Closest" then
+        local head = State.Locked.Character and State.Locked.Character:FindFirstChild("Head")
+        if head and head:IsA("BasePart") then
+            local cam = Workspace.CurrentCamera
+            if cam then
+                local headDist = (head.Position - cam.CFrame.Position).Magnitude
+                local hrpDist = (r.Position - cam.CFrame.Position).Magnitude
+                if headDist < hrpDist then part = head end
+            end
+        end
     end
+
     local pos = part.Position
-    if CONFIG.Aim.Predict then
-        local lead = r.AssemblyLinearVelocity * (pingSec() * CONFIG.Aim.PredictX)
+    if CONFIG.Target.Prediction then
+        local lead = r.AssemblyLinearVelocity * (pingSec() * CONFIG.Target.PredictX)
         local m = lead.Magnitude
-        if m > CONFIG.Aim.MaxLead and m > 0 then
-            lead = lead * (CONFIG.Aim.MaxLead / m)
+        if m > CONFIG.Target.MaxLead and m > 0 then
+            lead = lead * (CONFIG.Target.MaxLead / m)
         end
         pos = pos + lead
     end
     return pos
 end
 
--- Desvio angular (graus) entre a câmera e o ponto de mira
 local function aimError()
     local pos = getAimPoint()
     local cam = Workspace.CurrentCamera
-    if not pos or not cam then return nil end
+    if not pos or not cam then return 180 end
     local d = pos - cam.CFrame.Position
-    if d.Magnitude < 1e-3 then return 0 end
-    return math.deg(math.acos(math.clamp(cam.CFrame.LookVector:Dot(d.Unit), -1, 1)))
+    if d.Magnitude < 1e-4 then return 0 end
+    local cos = math.clamp(cam.CFrame.LookVector:Dot(d.Unit), -1, 1)
+    return math.deg(math.acos(cos))
 end
 
 local function aimFrame()
@@ -505,13 +596,19 @@ local function aimFrame()
     local cam = Workspace.CurrentCamera
     if not cam then return end
     local des = CFrame.lookAt(cam.CFrame.Position, pos)
+
     if CONFIG.Aim.Smooth > 0 then
-        cam.CFrame = cam.CFrame:Lerp(des, math.clamp(1 - CONFIG.Aim.Smooth, 0.05, 1))
+        if CONFIG.Aim.SmoothMethod == "Exponential" then
+            local alpha = 1 - math.exp(-CONFIG.Aim.Easing * (1 / RunService.RenderStepped:Wait()))
+            cam.CFrame = cam.CFrame:Lerp(des, alpha)
+        else
+            cam.CFrame = cam.CFrame:Lerp(des, math.clamp(1 - CONFIG.Aim.Smooth, 0.02, 1))
+        end
     else
         cam.CFrame = des
     end
 end
-RunService:BindToRenderStep("APEX_AIM", Enum.RenderPriority.Camera.Value + 1, aimFrame)
+RunService:BindToRenderStep("SM_CIRCLE_AIM", Enum.RenderPriority.Camera.Value + 1, aimFrame)
 
 -- ══════════════ AUTO-CAST ══════════════
 local function wallBlocked()
@@ -546,7 +643,6 @@ local function autoTick()
     local now = os.clock()
     if now < State.NextPress then return end
 
-    -- só aperta se a mira já convergiu: cast com câmera torta = whiff
     local err = aimError()
     if err == nil or err > CONFIG.Auto.MaxAngle then
         State.AlignCount = 0
@@ -555,11 +651,32 @@ local function autoTick()
     State.AlignCount = State.AlignCount + 1
     if State.AlignCount < CONFIG.Auto.AlignFrames then return end
 
-    for _, slot in ipairs(State.SlotOrder) do
+    -- Ordem inteligente: prioriza skills prontas por range/tipo
+    local order = State.SlotOrder
+    if CONFIG.Auto.SmartOrder then
+        local myPos = (LocalPlayer.Character and LocalPlayer.Character:FindFirstChild("HumanoidRootPart") and LocalPlayer.Character.HumanoidRootPart.Position)
+        local targetPos = getAimPoint()
+        local dist = myPos and targetPos and (myPos - targetPos).Magnitude or 999
+        order = {}
+        for _, slot in ipairs(State.SlotOrder) do
+            local meta = getSkillMeta(slot)
+            local range = meta and meta.Range or 999
+            local ready = not State.SlotBusy[slot] and (State.SlotCd[slot] or 0) <= now
+            if ready then
+                -- Prioriza skills que alcançam o alvo
+                if dist <= (range + 5) then
+                    table.insert(order, 1, slot)
+                else
+                    table.insert(order, slot)
+                end
+            end
+        end
+    end
+
+    for _, slot in ipairs(order) do
         local key = State.SlotKey[slot]
         if key and not State.SlotBusy[slot] and (State.SlotCd[slot] or 0) <= now then
             if CONFIG.Auto.WallCheck and wallBlocked() then return end
-            -- trava o slot na hora; o bindable do jogo sobrescreve com o cooldown real
             State.SlotCd[slot] = now + CONFIG.Auto.CooldownFallback
             State.NextPress = now + CONFIG.Auto.GapTime
             pressKey(key)
@@ -568,8 +685,7 @@ local function autoTick()
     end
 end
 
-
--- ══════════════ SORU (guiado, só no R, respeita alcance real) ══════════════
+-- ══════════════ SORU ══════════════
 local function fireTpFix()
     pcall(function()
         local rem = Replicated:FindFirstChild("Remotes")
@@ -588,12 +704,10 @@ local function soruStart()
     local now = os.clock()
     if now - State.LastSoru < CONFIG.Soru.Cooldown then return end
     if d > CONFIG.Soru.MaxDistance then
-        notify("Fora do alcance do Soru (" .. math.floor(d) .. "m > " .. CONFIG.Soru.MaxDistance .. "m)")
-        return
-    end
-    if d <= CONFIG.Soru.Behind + 1 then return end -- já está colado
+        notify("Soru: fora de alcance (" .. math.floor(d) .. "m)")
+        return end
+    if d <= CONFIG.Soru.Behind + 1 then return end
     State.LastSoru = now
-    -- Movimento guiado: Steps x Lerp nos próximos frames (não é TP seco)
     State.SoruStep = { steps = CONFIG.Soru.Steps, target = State.Locked }
 end
 
@@ -605,9 +719,8 @@ local function soruFrame()
     local _, tr = charOf(s.target)
     if not mr or not tr then State.SoruStep = nil return end
     local dest = tr.CFrame * CFrame.new(0, CONFIG.Soru.UpOffset, CONFIG.Soru.Behind)
-    -- guia: interpola até o ponto final (sem teleporte direto)
     mr.CFrame = mr.CFrame:Lerp(dest, CONFIG.Soru.Lerp)
-    mr.AssemblyLinearVelocity = Vector3.new(0, 0, 0)
+    mr.AssemblyLinearVelocity = Vector3.zero
     s.steps = s.steps - 1
     if s.steps <= 0 then
         mr.CFrame = dest
@@ -616,205 +729,245 @@ local function soruFrame()
     end
 end
 
+-- ══════════════ CÍRCULO VISUAL (RENDER) ══════════════
+local function createCircle()
+    local c = Instance.new("Frame")
+    c.Name = "SM_Circle"
+    c.BackgroundTransparency = 1
+    c.AnchorPoint = Vector2.new(0.5, 0.5)
+    c.ZIndex = 0
+    c.Visible = CONFIG.Circle.Enabled
+
+    local stroke = Instance.new("UIStroke")
+    stroke.Name = "CircleStroke"
+    stroke.Color = CONFIG.Circle.Color
+    stroke.Thickness = CONFIG.Circle.Thickness
+    stroke.Transparency = CONFIG.Circle.Transparency
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.Parent = c
+
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = c
+
+    if CONFIG.Circle.FillEnabled then
+        c.BackgroundColor3 = CONFIG.Circle.FillColor
+        c.BackgroundTransparency = CONFIG.Circle.FillTransparency
+    end
+
+    return c
+end
+
+local function createCrosshair()
+    local c = Instance.new("Frame")
+    c.Name = "SM_Crosshair"
+    c.BackgroundTransparency = 1
+    c.AnchorPoint = Vector2.new(0.5, 0.5)
+    c.Position = UDim2.fromScale(0.5, 0.5)
+    c.ZIndex = 10
+    c.Visible = CONFIG.Circle.ShowCrosshair
+
+    local size = CONFIG.Circle.CrosshairSize
+    local gap = CONFIG.Circle.CrosshairGap
+    local color = CONFIG.Circle.Color
+    local thickness = 1.5
+
+    -- 4 linhas
+    local function line(pos, sz, rot)
+        local l = Instance.new("Frame")
+        l.BackgroundColor3 = color
+        l.BorderSizePixel = 0
+        l.Size = sz
+        l.Position = pos
+        l.Rotation = rot
+        l.ZIndex = 10
+        l.Parent = c
+        Instance.new("UICorner", l).CornerRadius = UDim.new(0, 1)
+        return l
+    end
+
+    line(UDim2.fromOffset(-gap - size, 0), UDim2.fromOffset(size, thickness), 0)      -- Left
+    line(UDim2.fromOffset(gap, 0), UDim2.fromOffset(size, thickness), 0)               -- Right
+    line(UDim2.fromOffset(0, -gap - size), UDim2.fromOffset(thickness, size), 90)      -- Up
+    line(UDim2.fromOffset(0, gap), UDim2.fromOffset(thickness, size), 90)              -- Down
+
+    return c
+end
+
+local function updateCircle()
+    if not State.CircleObj then State.CircleObj = createCircle() end
+    local circle = State.CircleObj
+    if not circle then return end
+
+    local cam = Workspace.CurrentCamera
+    if not cam then circle.Visible = false return end
+
+    local radius = calculateCircleRadius()
+    local diameter = radius * 2
+    circle.Size = UDim2.fromOffset(diameter, diameter)
+    circle.Position = UDim2.fromScale(0.5, 0.5)
+    circle.Visible = CONFIG.Circle.Enabled
+
+    circle.CircleStroke.Color = CONFIG.Circle.Color
+    circle.CircleStroke.Thickness = CONFIG.Circle.Thickness
+    circle.CircleStroke.Transparency = CONFIG.Circle.Transparency
+
+    if CONFIG.Circle.FillEnabled then
+        circle.BackgroundColor3 = CONFIG.Circle.FillColor
+        circle.BackgroundTransparency = CONFIG.Circle.FillTransparency
+    else
+        circle.BackgroundTransparency = 1
+    end
+
+    -- Pulso quando travado
+    if CONFIG.Circle.PulseEnabled and State.Locked and alive(State.Locked) then
+        State.PulsePhase = State.PulsePhase + CONFIG.Circle.PulseSpeed * RunService.RenderStepped:Wait()
+        local pulse = 1 + 0.08 * math.sin(State.PulsePhase)
+        circle.Size = UDim2.fromOffset(diameter * pulse, diameter * pulse)
+    end
+end
+
+local function updateCrosshair()
+    if not State.CrosshairObj then State.CrosshairObj = createCrosshair() end
+    local ch = State.CrosshairObj
+    if not ch then return end
+    ch.Visible = CONFIG.Circle.ShowCrosshair and CONFIG.Circle.Enabled
+end
+
 -- ══════════════ MARCADOR ══════════════
+local MK = { hl = nil, bb = nil, pr = nil, tx = nil }
+
 local function clearMarker()
     if MK.hl then pcall(function() MK.hl:Destroy() end) end
     if MK.bb then pcall(function() MK.bb:Destroy() end) end
     MK.hl, MK.bb, MK.pr, MK.tx = nil, nil, nil, nil
 end
-clearMarkerSafe = clearMarker
-updateMarker = function()
+
+local function updateMarker()
     clearMarker()
     local p = State.Locked
     if not p or not alive(p) or not CONFIG.Marker.Enabled then return end
     local c = p.Character
     if not c then return end
+
     local hl = Instance.new("Highlight")
-    hl.Name = "APEX_Mark"
+    hl.Name = "SM_Mark"
     hl.Adornee = c
     hl.FillColor = CONFIG.Marker.Color
     hl.OutlineColor = CONFIG.Marker.Color
-    hl.FillTransparency = 0.75
+    hl.FillTransparency = 0.78
     hl.OutlineTransparency = 0
     hl.DepthMode = Enum.HighlightDepthMode.AlwaysOnTop
     hl.Parent = c
     MK.hl = hl
     MK.pr = p
+
     local hd = c:FindFirstChild("Head")
     if hd then
         local bb = Instance.new("BillboardGui")
-        bb.Name = "APEX_Tag"
+        bb.Name = "SM_Tag"
         bb.Adornee = hd
-        bb.Size = UDim2.fromOffset(140, 36)
-        bb.StudsOffset = Vector3.new(0, 3, 0)
+        bb.Size = UDim2.fromOffset(200, 48)
+        bb.StudsOffset = Vector3.new(0, 3.5, 0)
         bb.AlwaysOnTop = true
         bb.Parent = hd
+
         local tx = Instance.new("TextLabel")
         tx.Size = UDim2.new(1, 0, 1, 0)
         tx.BackgroundTransparency = 1
-        tx.Font = Enum.Font.GothamBold
-        tx.TextSize = 12
-        tx.TextColor3 = CONFIG.Marker.Color
-        tx.TextStrokeTransparency = 0.4
+        tx.Font = CONFIG.UI.BoldFont
+        tx.TextSize = 11
+        tx.TextColor3 = CONFIG.UI.TextColor
+        tx.TextStrokeTransparency = 0.3
+        tx.TextXAlignment = Enum.TextXAlignment.Center
         tx.Parent = bb
         MK.bb = bb
         MK.tx = tx
     end
 end
+
 local function markerTick()
     if MK.pr and MK.tx and alive(MK.pr) then
         local _, _, u = charOf(MK.pr)
-        MK.tx.Text = string.format("%s  %d%%", MK.pr.DisplayName or MK.pr.Name,
-            math.floor((u.Health / math.max(u.MaxHealth, 1)) * 100))
+        local hp = u and math.floor(u.Health) or 0
+        local maxHp = u and math.floor(u.MaxHealth) or 100
+        local pct = math.floor((hp / math.max(maxHp, 1)) * 100)
+        local dist = 0
+        local _, mr = charOf(LocalPlayer)
+        local _, tr = charOf(MK.pr)
+        if mr and tr then dist = math.floor((tr.Position - mr.Position).Magnitude) end
+        local bounty = bountyOf(MK.pr)
+        local fac = getFaction(MK.pr) or "?"
+        local facColor = fac == "Pirate" and Color3.fromRGB(255, 150, 50) or (fac == "Marine" and Color3.fromRGB(50, 140, 255) or CONFIG.UI.TextColor)
+
+        local parts = { MK.pr.DisplayName .. "  " .. pct .. "%" }
+        if CONFIG.Marker.ShowDistance then table.insert(parts, dist .. "m") end
+        if CONFIG.Marker.ShowBounty then table.insert(parts, "$" .. bounty) end
+        if CONFIG.Marker.ShowFaction then table.insert(parts, "[" .. fac .. "]") end
+
+        MK.tx.Text = table.concat(parts, "  ·  ")
     end
-    updateFOVCircle()
+    updateCircle()
+    updateCrosshair()
 end
 
--- ══════════════ DOT (pontinho, opcional) ══════════════
-local function dotTick()
-    if not CONFIG.Aim.Indicator or not aimActive() or not State.Locked or not alive(State.Locked) then
-        if State.Dot then State.Dot.Visible = false end
-        return
-    end
-    if not State.Dot then
-        local d = Instance.new("Frame")
-        d.Name = "APEX_Dot"
-        d.Size = UDim2.fromOffset(5, 5)
-        d.BackgroundColor3 = Color3.fromRGB(255, 255, 255)
-        d.BorderSizePixel = 0
-        d.Visible = false
-        d.ZIndex = 9
-        local cn = Instance.new("UICorner")
-        cn.CornerRadius = UDim.new(1, 0)
-        cn.Parent = d
-        d.Parent = ScreenGui
-        State.Dot = d
-    end
-    local _, r = charOf(State.Locked)
-    local cam = Workspace.CurrentCamera
-    if not r or not cam then State.Dot.Visible = false return end
-    local v, on = cam:WorldToViewportPoint(r.Position)
-    State.Dot.Visible = on and v.Z > 0
-    if State.Dot.Visible then State.Dot.Position = UDim2.fromOffset(v.X - 2, v.Y - 2) end
-end
-
--- ══════════════ FOV CIRCLE (visual do cone do aimbot) ══════════════
-local FOVCircle = nil
-local function createFOVCircle()
-    if not CONFIG.FOVCircle.Enabled then return end
-    local c = Instance.new("Frame")
-    c.Name = "APEX_FOVCircle"
-    c.BackgroundTransparency = 1
-    c.Size = UDim2.fromOffset(0, 0)
-    c.Position = UDim2.fromScale(0.5, 0.5)
-    c.AnchorPoint = Vector2.new(0.5, 0.5)
-    c.ZIndex = 1
-    local stroke = Instance.new("UIStroke")
-    stroke.Color = CONFIG.FOVCircle.Color
-    stroke.Transparency = CONFIG.FOVCircle.Transparency
-    stroke.Thickness = CONFIG.FOVCircle.Thickness
-    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
-    stroke.Parent = c
-    local corner = Instance.new("UICorner")
-    corner.CornerRadius = UDim.new(1, 0)
-    corner.Parent = c
-    c.Parent = ScreenGui
-    FOVCircle = c
-end
-
-local function updateFOVCircle()
-    if not CONFIG.FOVCircle.Enabled then
-        if FOVCircle then FOVCircle.Visible = false end
-        return
-    end
-    if not FOVCircle then createFOVCircle() end
-    if not FOVCircle then return end
-    local cam = Workspace.CurrentCamera
-    if not cam then FOVCircle.Visible = false return end
-    -- Calcula o raio em pixels baseado no FOVDeg e no viewport
-    local vp = cam.ViewportSize
-    local verticalFov = cam.FieldOfView -- graus
-    local halfFovRad = math.rad(verticalFov / 2)
-    -- Tamanho do viewport em world units na distância 1 stud
-    -- worldHeightAt1 = 2 * tan(fov/2)
-    -- pixelsPerStudAt1 = vp.Y / worldHeightAt1
-    -- Queremos raio em pixels para o nosso FOVDeg:
-    -- raioPixels = tan(FOVDeg/2) * pixelsPerStudAt1
-    -- Simplificado: proporção do nosso FOV sobre o FOV da câmera
-    local ratio = math.tan(math.rad(CONFIG.Target.FOVDeg / 2)) / math.tan(halfFovRad)
-    local radius = math.min(vp.X, vp.Y) * 0.5 * ratio
-    FOVCircle.Size = UDim2.fromOffset(radius * 2, radius * 2)
-    FOVCircle.Visible = true
-    FOVCircle.UIStroke.Color = CONFIG.FOVCircle.Color
-    FOVCircle.UIStroke.Transparency = CONFIG.FOVCircle.Transparency
-    FOVCircle.UIStroke.Thickness = CONFIG.FOVCircle.Thickness
-end
-
--- ══════════════ GUI (mínima: status + alvo + exclusão) ══════════════
+-- ══════════════ UI — MINIMAL "S + M" ══════════════
 local TZ = {
-    bg    = Color3.fromRGB(10, 10, 12),
-    panel = Color3.fromRGB(18, 18, 22),
-    line  = Color3.fromRGB(40, 40, 48),
-    txt   = Color3.fromRGB(235, 235, 240),
-    mut   = Color3.fromRGB(120, 120, 130),
-    on    = Color3.fromRGB(90, 200, 130),
-    off   = Color3.fromRGB(200, 90, 90),
+    bg        = CONFIG.UI.BackgroundColor,
+    panel     = CONFIG.UI.PanelColor,
+    line      = CONFIG.UI.BorderColor,
+    txt       = CONFIG.UI.TextColor,
+    mut       = CONFIG.UI.MutedColor,
+    accent    = CONFIG.UI.AccentColor,
 }
 
 local ScreenGui = Instance.new("ScreenGui")
-ScreenGui.Name = "APEX_v5"
+ScreenGui.Name = "SM_Apex"
 ScreenGui.ResetOnSpawn = false
 ScreenGui.IgnoreGuiInset = true
 ScreenGui.ZIndexBehavior = Enum.ZIndexBehavior.Sibling
 do
-    local ok, c = pcall(function() return game:GetService("CoreGui") end)
-    if ok and c then
-        local w = pcall(function() ScreenGui.Parent = c end)
-        if w and ScreenGui.Parent == c then notify("GUI: CoreGui") end
-    end
+    local ok, cg = pcall(function() return game:GetService("CoreGui") end)
+    if ok and cg then pcall(function() ScreenGui.Parent = cg end) end
     if not ScreenGui.Parent then
         local pg = LocalPlayer:WaitForChild("PlayerGui", 10)
-        if pg then
-            ScreenGui.Parent = pg
-            notify("GUI: PlayerGui")
-        else
-            notify("ERRO: não foi possível parentar a GUI!")
-        end
+        if pg then ScreenGui.Parent = pg end
     end
 end
 
-local function New(cls, pr, par)
+local function New(cls, props, parent)
     local o = Instance.new(cls)
-    for k, v in pairs(pr) do o[k] = v end
-    o.Parent = par
+    for k, v in pairs(props) do o[k] = v end
+    o.Parent = parent
     return o
 end
-local function corner(o, r) New("UICorner", { CornerRadius = UDim.new(0, r or 6) }, o) end
+local function corner(o, r) New("UICorner", { CornerRadius = UDim.new(0, r or CONFIG.UI.Rounding) }, o) end
 
+-- Container principal (arrastável)
 local Main = New("Frame", {
     Name = "Main",
-    Size = UDim2.fromOffset(260, 300),
-    Position = UDim2.new(0.5, -130, 0.5, -150),
+    Size = UDim2.fromOffset(220, 140),
     BackgroundColor3 = TZ.bg,
     BorderSizePixel = 0,
     Active = true,
     Visible = true,
+    ZIndex = 100,
 }, ScreenGui)
-corner(Main, 10)
+corner(Main)
 New("UIStroke", { Color = TZ.line, Thickness = 1 }, Main)
 
--- título + drag
+-- Título "S + M" (drag handle)
 local Title = New("TextLabel", {
-    Size = UDim2.new(1, 0, 0, 30),
+    Size = UDim2.new(1, 0, 0, 28),
     BackgroundColor3 = TZ.panel,
-    Text = "  " .. SCRIPT_NAME,
-    Font = Enum.Font.GothamBold,
+    Text = "  S + M",
+    Font = CONFIG.UI.BoldFont,
     TextSize = 13,
-    TextColor3 = TZ.txt,
+    TextColor3 = TZ.accent,
     TextXAlignment = Enum.TextXAlignment.Left,
 }, Main)
-corner(Title, 10)
-New("UIStroke", { Color = TZ.line, Thickness = 1 }, Title)
+corner(Title)
+
 do
     local drag, dStart, mStart
     Title.InputBegan:Connect(function(i)
@@ -833,224 +986,203 @@ do
     end))
 end
 
--- STATUS: aimbot on/off + alvo
-local AimLbl = New("TextLabel", {
-    Size = UDim2.new(1, -16, 0, 22),
+-- Status linha única
+local StatusLbl = New("TextLabel", {
+    Size = UDim2.new(1, -16, 0, 20),
     Position = UDim2.fromOffset(8, 36),
     BackgroundTransparency = 1,
-    Font = Enum.Font.GothamBold,
-    TextSize = 12,
+    Font = CONFIG.UI.Font,
+    TextSize = 11,
     TextXAlignment = Enum.TextXAlignment.Left,
 }, Main)
+
 local TargetLbl = New("TextLabel", {
-    Size = UDim2.new(1, -16, 0, 20),
+    Size = UDim2.new(1, -16, 0, 18),
     Position = UDim2.fromOffset(8, 58),
     BackgroundTransparency = 1,
-    Font = Enum.Font.Gotham,
-    TextSize = 11,
-    TextColor3 = TZ.mut,
-    TextXAlignment = Enum.TextXAlignment.Left,
-    Text = "alvo: nenhum",
-}, Main)
-
-function UI.refreshAim()
-    AimLbl.Text = "aim: " .. (CONFIG.Aim.Enabled and "ON" or "OFF")
-        .. "  ·  auto: " .. (CONFIG.Auto.Enabled and "ON" or "OFF")
-    if not CONFIG.Aim.Enabled then
-        AimLbl.TextColor3 = TZ.off
-    elseif CONFIG.Auto.Enabled then
-        AimLbl.TextColor3 = TZ.on
-    else
-        AimLbl.TextColor3 = TZ.txt
-    end
-end
-function UI.refreshTarget()
-    TargetLbl.Text = State.Locked and ("alvo: " .. State.Locked.DisplayName) or "alvo: nenhum"
-    TargetLbl.TextColor3 = State.Locked and TZ.txt or TZ.mut
-end
-UI.refreshAim()
-UI.refreshTarget()
-
--- LISTA DE EXCLUSÃO (clique = excluir/incluir do aimbot)
-local ListTitle = New("TextLabel", {
-    Size = UDim2.new(1, -16, 0, 16),
-    Position = UDim2.fromOffset(8, 82),
-    BackgroundTransparency = 1,
-    Text = "— EXCLUIR DO AIMBOT (clique) —",
-    Font = Enum.Font.GothamBold,
+    Font = CONFIG.UI.Font,
     TextSize = 10,
     TextColor3 = TZ.mut,
     TextXAlignment = Enum.TextXAlignment.Left,
+    Text = "target: none",
 }, Main)
 
-local PList = New("ScrollingFrame", {
-    Size = UDim2.new(1, -16, 1, -104),
-    Position = UDim2.fromOffset(8, 100),
-    BackgroundColor3 = TZ.panel,
-    ScrollBarThickness = 2,
-    ScrollBarImageColor3 = TZ.line,
-    AutomaticCanvasSize = Enum.AutomaticSize.Y,
-    CanvasSize = UDim2.new(),
-}, Main)
-corner(PList, 6)
-New("UIStroke", { Color = TZ.line, Thickness = 1 }, PList)
-New("UIListLayout", { Padding = UDim.new(0, 2), SortOrder = Enum.SortOrder.LayoutOrder }, PList)
+-- Configs rápidas (sliders compactos)
+local function makeRow(label, y, getter, setter, min, max, step, fmt)
+    local Lbl = New("TextLabel", {
+        Size = UDim2.new(0.5, -4, 0, 18), Position = UDim2.fromOffset(8, y),
+        BackgroundTransparency = 1, Font = CONFIG.UI.Font, TextSize = 10,
+        TextColor3 = TZ.mut, TextXAlignment = Enum.TextXAlignment.Left,
+        Text = label,
+    }, Main)
+    local Val = New("TextLabel", {
+        Size = UDim2.new(0.25, 0, 0, 18), Position = UDim2.new(0.5, 4, 0, y),
+        BackgroundTransparency = 1, Font = CONFIG.UI.BoldFont, TextSize = 10,
+        TextColor3 = TZ.txt, TextXAlignment = Enum.TextXAlignment.Right,
+        Text = fmt(getter()),
+    }, Main)
+    local Slider = New("TextButton", {
+        Size = UDim2.new(0.25, -12, 0, 18), Position = UDim2.new(0.75, 4, 0, y),
+        BackgroundColor3 = TZ.panel, Text = "", AutoButtonColor = false,
+    }, Main)
+    corner(Slider)
+    New("UIStroke", { Color = TZ.line, Thickness = 1 }, Slider)
 
-State.Rows = {}
-local function refreshList()
-    for _, r in ipairs(State.Rows) do if r.Parent then r:Destroy() end end
-    State.Rows = {}
-    for _, p in ipairs(Players:GetPlayers()) do
-        if p ~= LocalPlayer and p.Parent then
-            local isA = ally(p)
-            local isI = ignored(p)
-            local pv = pvpOn(p)
-            local _, _, u = charOf(p)
-            local hp = u and math.floor(u.Health) or 0
-            local bounty = bountyOf(p)
-            local fac = getFaction(p) or "?"
-            local col = TZ.txt
-            if isI then col = TZ.off
-            elseif isA then col = TZ.on end
-            local tag = pv and "PvP" or "OFF"
-            -- Cor da facção: Pirate = laranja, Marine = azul
-            local facColor = TZ.txt
-            if fac == "Pirate" then facColor = Color3.fromRGB(255, 160, 60)
-            elseif fac == "Marine" then facColor = Color3.fromRGB(60, 140, 255) end
-            local row = New("TextButton", {
-                Size = UDim2.new(1, 0, 0, 20),
-                BackgroundColor3 = TZ.bg,
-                Text = string.format("  %s%s  ·  %dHP  ·  $%d  ·  [%s]  ·  %s",
-                    (isI and "[X] " or ""), p.DisplayName or p.Name, hp, bounty, fac, tag),
-                TextColor3 = col,
-                Font = Enum.Font.Gotham,
-                TextSize = 10,
-                TextXAlignment = Enum.TextXAlignment.Left,
-                AutoButtonColor = false,
-            }, PList)
-            corner(row, 4)
-            -- Label de facção colorida ao clicar (feedback visual)
-            row.MouseButton1Click:Connect(function()
-                local id = tostring(p.UserId)
-                State.Ignore[id] = not State.Ignore[id] or nil
-                if State.Ignore[id] then
-                    notify("Excluído do aimbot: " .. p.DisplayName .. " (" .. fac .. ")")
-                    if State.Locked == p then State.Locked = nil updateMarker() UI.refreshTarget() clearMarker() end
-                else
-                    State.Ignore[id] = nil
-                    notify("Incluído de volta: " .. p.DisplayName .. " (" .. fac .. ")")
-                end
-                saveCfg()
-                refreshList()
-            end)
-            table.insert(State.Rows, row)
+    local fill = New("Frame", {
+        Size = UDim2.fromScale((getter() - min) / (max - min), 1),
+        BackgroundColor3 = TZ.accent, BorderSizePixel = 0,
+    }, Slider)
+    corner(fill)
+
+    local dragging = false
+    Slider.InputBegan:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = true end
+    end)
+    track(UserInput.InputChanged:Connect(function(i)
+        if dragging and i.UserInputType == Enum.UserInputType.MouseMovement then
+            local rel = math.clamp((i.Position.X - Slider.AbsolutePosition.X) / Slider.AbsoluteSize.X, 0, 1)
+            local val = min + rel * (max - min)
+            val = math.floor(val / step + 0.5) * step
+            val = math.clamp(val, min, max)
+            setter(val)
+            Val.Text = fmt(val)
+            fill.Size = UDim2.fromScale((val - min) / (max - min), 1)
         end
-    end
+    end))
+    track(UserInput.InputEnded:Connect(function(i)
+        if i.UserInputType == Enum.UserInputType.MouseButton1 then dragging = false end
+    end))
 end
-track(Players.PlayerAdded:Connect(function() refreshList() end))
--- Não apaga a exclusão ao sair: a lista é persistida por UserId e precisa sobreviver ao relog.
-track(Players.PlayerRemoving:Connect(function() refreshList() end))
 
--- FAB (reabre se fechar)
+-- Linhas de config
+makeRow("Circle Radius", 80, function() return CONFIG.Circle.Radius end, function(v) CONFIG.Circle.Radius = v end, 40, 500, 5, function(v) return v .. "px" end)
+makeRow("Max Angle", 100, function() return CONFIG.Auto.MaxAngle end, function(v) CONFIG.Auto.MaxAngle = v end, 1, 20, 0.5, function(v) return v .. "°" end)
+makeRow("Smooth", 120, function() return CONFIG.Aim.Smooth end, function(v) CONFIG.Aim.Smooth = v end, 0, 0.5, 0.02, function(v) return string.format("%.2f", v) end)
+
+-- Toggle buttons row
+local function makeToggle(text, y, get, set)
+    local btn = New("TextButton", {
+        Size = UDim2.new(0.5, -10, 0, 22), Position = UDim2.fromOffset(8 + (text:find("Auto") and 110 or 0), y),
+        BackgroundColor3 = TZ.panel, Text = text .. ": " .. (get() and "ON" or "OFF"),
+        Font = CONFIG.UI.BoldFont, TextSize = 10, TextColor3 = TZ.txt,
+        AutoButtonColor = false,
+    }, Main)
+    corner(btn)
+    New("UIStroke", { Color = TZ.line, Thickness = 1 }, btn)
+    btn.MouseButton1Click:Connect(function()
+        set(not get())
+        btn.Text = text .. ": " .. (get() and "ON" or "OFF")
+        btn.TextColor3 = get() and TZ.accent or TZ.txt
+    end)
+    return btn
+end
+
+local aimBtn = makeToggle("Aim", 142, function() return CONFIG.Aim.Enabled end, function(v) CONFIG.Aim.Enabled = v; StatusLbl.Text = "aim: " .. (v and "ON" or "OFF") end)
+local autoBtn = makeToggle("Auto", 142, function() return CONFIG.Auto.Enabled end, function(v) CONFIG.Auto.Enabled = v end)
+local circleBtn = makeToggle("Circle", 166, function() return CONFIG.Circle.Enabled end, function(v) CONFIG.Circle.Enabled = v end)
+local facBtn = makeToggle("Faction", 166, function() return CONFIG.Target.FactionCheck end, function(v) CONFIG.Target.FactionCheck = v end)
+
+local function refreshStatus()
+    StatusLbl.Text = "aim: " .. (CONFIG.Aim.Enabled and "ON" or "OFF")
+        .. "  ·  auto: " .. (CONFIG.Auto.Enabled and "ON" or "OFF")
+        .. "  ·  circle: " .. (CONFIG.Circle.Enabled and "ON" or "OFF")
+    StatusLbl.TextColor3 = CONFIG.Aim.Enabled and TZ.accent or TZ.mut
+end
+refreshStatus()
+
+function UI.refreshTarget()
+    TargetLbl.Text = State.Locked and ("target: " .. State.Locked.DisplayName .. " [" .. (getFaction(State.Locked) or "?") .. "]") or "target: none"
+    TargetLbl.TextColor3 = State.Locked and TZ.txt or TZ.mut
+end
+
+-- FAB para reabrir
 local Fab = New("TextButton", {
-    Size = UDim2.fromOffset(34, 34),
-    Position = UDim2.new(0, 10, 0.5, -17),
-    BackgroundColor3 = TZ.bg,
-    Font = Enum.Font.GothamBold,
-    TextSize = 11,
-    TextColor3 = TZ.txt,
-    Text = "SM",
-    Visible = false,
+    Size = UDim2.fromOffset(30, 30), Position = UDim2.new(0, 8, 0.5, -15),
+    BackgroundColor3 = TZ.bg, Text = "S+M", Font = CONFIG.UI.BoldFont,
+    TextSize = 10, TextColor3 = TZ.accent, Visible = false,
 }, ScreenGui)
-corner(Fab, 17)
+corner(Fab, 15)
 New("UIStroke", { Color = TZ.line, Thickness = 1 }, Fab)
-Fab.MouseButton1Click:Connect(function() State.MenuOpen = true UI.updateVis() end)
+Fab.MouseButton1Click:Connect(function() State.MenuOpen = true Main.Visible = true Fab.Visible = false end)
 
-function UI.updateVis()
-    Main.Visible = State.MenuOpen
-    Fab.Visible = not State.MenuOpen
+-- Posição inicial
+local function applyUIPosition()
+    local vp = Workspace.CurrentCamera and Workspace.CurrentCamera.ViewportSize or Vector2.new(1920, 1080)
+    local pos = CONFIG.UI.Position
+    if pos == "TopLeft" then Main.Position = UDim2.fromOffset(16, 16)
+    elseif pos == "TopRight" then Main.Position = UDim2.fromOffset(vp.X - 236, 16)
+    elseif pos == "BottomLeft" then Main.Position = UDim2.fromOffset(16, vp.Y - 156)
+    elseif pos == "BottomRight" then Main.Position = UDim2.fromOffset(vp.X - 236, vp.Y - 156) end
 end
-UI.updateVis()
+applyUIPosition()
 
 -- ══════════════ INPUT ══════════════
 track(UserInput.InputBegan:Connect(function(input, gpe)
     local it = input.UserInputType
 
-    -- skills passam SEMPRE (mesmo gpe=true)
+    -- Skills (hold = aim)
     if it == Enum.UserInputType.Keyboard and SkillSet[input.KeyCode] then
         State.Held = State.Held + 1
-        pick()
+        pickTarget()
         return
     end
 
-    -- botões laterais do mouse (antes do gpe: mouse lateral não é "game processed")
-    if it == Enum.UserInputType.MouseButton4 then
-        cycleTarget()
-        return
-    end
-    if it == Enum.UserInputType.MouseButton5 then
-        State.MenuOpen = false
-        UI.updateVis()
-        return
-    end
+    -- Mouse lateral
+    if it == Enum.UserInputType.MouseButton4 then cycleTarget() return end
+    if it == Enum.UserInputType.MouseButton5 then State.MenuOpen = false Main.Visible = false Fab.Visible = true return end
 
     if gpe then return end
 
-    if input.KeyCode == CONFIG.Keys.Aim then
+    if input.KeyCode == CONFIG.Keys.AimToggle then
         CONFIG.Aim.Enabled = not CONFIG.Aim.Enabled
-        UI.refreshAim()
-        notify("Aimbot: " .. (CONFIG.Aim.Enabled and "ON" or "OFF"))
+        aimBtn.Text = "Aim: " .. (CONFIG.Aim.Enabled and "ON" or "OFF")
+        refreshStatus()
+        notify("Aim: " .. (CONFIG.Aim.Enabled and "ON" or "OFF"))
         return
     end
-    if input.KeyCode == CONFIG.Keys.Auto then
-        if State.InputOk == false then
-            notify("AUTO-CAST indisponível neste executor (sem VirtualInputManager).")
-            return
-        end
+    if input.KeyCode == CONFIG.Keys.AutoToggle then
+        if State.InputOk == false then notify("VIM indisponível") return end
         CONFIG.Auto.Enabled = not CONFIG.Auto.Enabled
-        State.AlignCount = 0
-        UI.refreshAim()
-        notify("Auto-cast: " .. (CONFIG.Auto.Enabled and "ON" or "OFF"))
+        autoBtn.Text = "Auto: " .. (CONFIG.Auto.Enabled and "ON" or "OFF")
+        refreshStatus()
+        notify("Auto: " .. (CONFIG.Auto.Enabled and "ON" or "OFF"))
         return
     end
-    if input.KeyCode == CONFIG.Keys.Menu then
+    if input.KeyCode == CONFIG.Keys.MenuToggle then
         State.MenuOpen = not State.MenuOpen
-        UI.updateVis()
+        Main.Visible = State.MenuOpen
+        Fab.Visible = not State.MenuOpen
         return
     end
-    if input.KeyCode == CONFIG.Keys.Unload then
-        cleanup()
-        return
-    end
-    if input.KeyCode == CONFIG.Keys.Soru then
-        soruStart() -- soru só aqui: guiado, uma vez por aperto
-        return
-    end
+    if input.KeyCode == CONFIG.Keys.Unload then cleanup() return end
+    if input.KeyCode == CONFIG.Keys.CycleTarget then cycleTarget() return end
+    if input.KeyCode == CONFIG.Keys.Soru then soruStart() return end
 end))
 
 track(UserInput.InputEnded:Connect(function(input)
-    if SkillSet[input.KeyCode] and State.Held > 0 then
-        State.Held = State.Held - 1
-    end
+    if SkillSet[input.KeyCode] and State.Held > 0 then State.Held = State.Held - 1 end
 end))
 
--- ══════════════ LOOP ══════════════
+-- ══════════════ MAIN LOOP ══════════════
 track(RunService.Heartbeat:Connect(function()
     if State.Unloaded then return end
     local now = os.clock()
-    if now - State.TickTarget > 0.1 then
+
+    -- Target picker (100ms)
+    if now - (State.TickTarget or 0) > 0.1 then
         State.TickTarget = now
-        pick()
+        pickTarget()
         if State.Locked and MK.pr ~= State.Locked then updateMarker() UI.refreshTarget() end
         if not State.Locked and MK.pr then clearMarker() UI.refreshTarget() end
     end
-    if now - State.TickList > 2.0 then
+
+    -- Lista + marker + circle (2s)
+    if now - (State.TickList or 0) > 2.0 then
         State.TickList = now
-        refreshList()
         markerTick()
     end
+
     soruFrame()
-    dotTick()
     autoTick()
 end))
 
@@ -1058,28 +1190,25 @@ end))
 function cleanup()
     if State.Unloaded then return end
     State.Unloaded = true
-    pcall(function() RunService:UnbindFromRenderStep("APEX_AIM") end)
+    pcall(function() RunService:UnbindFromRenderStep("SM_CIRCLE_AIM") end)
     for _, c in ipairs(State.Conns) do pcall(function() c:Disconnect() end) end
     clearMarker()
-    if State.Dot then pcall(function() State.Dot:Destroy() end) end
-    if FOVCircle then pcall(function() FOVCircle:Destroy() end) end
+    if State.CircleObj then pcall(function() State.CircleObj:Destroy() end) end
+    if State.CrosshairObj then pcall(function() State.CrosshairObj:Destroy() end) end
     pcall(function() ScreenGui:Destroy() end)
-    genv.BF_APEX = nil
-    notify("Descarregado.")
+    genv.SM_APEX = nil
+    notify("Unloaded.")
 end
-genv.BF_APEX = { Destroy = cleanup }
+genv.SM_APEX = { Destroy = cleanup }
 
-refreshList()
-UI.refreshAim()
-UI.refreshTarget()
-UI.updateVis()
-
--- Inicializa input puro (descobre binds do jogo e conecta sinais de cooldown real)
+-- ══════════════ INIT ══════════════
 resolveSkillSlots()
 bindSkillSignals()
+State.CircleObj = createCircle()
+State.CircleObj.Parent = ScreenGui
+State.CrosshairObj = createCrosshair()
+State.CrosshairObj.Parent = ScreenGui
+updateCircle()
+updateCrosshair()
 
--- Inicializa FOV circle visual
-createFOVCircle()
-updateFOVCircle()
-
-notify("Carregado. RightShift=Aim | RightAlt=Auto | RightCtrl=menu | Delete=unload | G=ciclar | R=Soru | MB4/MB5=mouse")
+notify("S+M APEX loaded. RightShift=Aim | RightAlt=Auto | RightCtrl=Menu | Delete=Unload | G=Cycle | R=Soru | MB4/MB5=Mouse")

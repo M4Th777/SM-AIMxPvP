@@ -1,23 +1,25 @@
 --[[
-    S+AIMxPvP — APEX v6 (INPUT PURO)
+    S+AIMxPvP — APEX v7 (FACÇÃO + FOV + UNLOAD FIX)
     Aimbot nas skills + Soru guiado (R) + Menu mínimo + Lista de exclusão
     https://github.com/M4Th777/SM-AIMxPvP
 
     EXECUTAR VIA LOADSTRING:
     loadstring(game:HttpGet("https://raw.githubusercontent.com/M4Th777/SM-AIMxPvP/main/main.lua"))()
 
-    v6 — INPUT PURO (VirtualInputManager) + auto-cast com cooldown real
+    v7 — FACÇÃO (Pirate/Marine) + FOV VISUAL + UNLOAD SEGURO + AUTO-CAST PURO
 
     CONTROLES:
       RightShift   = Aimbot ON/OFF
+      RightAlt     = AUTO-CAST ON/OFF (aperta a skill por você, via input nativo)
       RightControl = Abre/fecha menu
-      Delete       = Descarregar script  -- final e seguro
+      Delete       = Descarregar script (final e seguro)
       G            = Trocar alvo (rápido, dentro do FOV)
       Z X C V F    = Skills (ao segurar: mira trava no alvo)
       R            = Soru guiado no alvo (distância máxima real)
+      MB4 / MB5    = Ciclar alvo / Ocultar menu (modo legit)
 
-      FOVDeg no menu = quanto maior (120-150°), mais targets o aim pega
-      MaxAngle no AutoCast = só aperta a skill se alvo estiver alinhado (6° default) (sinta 120-150 para o ápice)
+      FOVDeg no menu = cone de visão do aimbot (90° = metade da tela, 120-150° = ápice)
+      MaxAngle no AutoCast = só aperta a skill se alvo estiver alinhado (6° default)
 
     POR QUE INPUT PURO:
       A tecla é enviada pelo VirtualInputManager, então quem trata o cast é o
@@ -43,6 +45,8 @@ local CONFIG = {
         TeamCheck   = true,
         FriendCheck = true,
         OnlyPvP     = true,
+        -- FACÇÃO: só ataca lado oposto (Pirate vs Marine). Desligue se quiser FFA.
+        FactionCheck = true,
         -- FOV DE TRABALHO: cone de visão que o aimbot considera.
         -- Graus. 90 = metade da tela (agressivo). 180 = qualquer coisa à frente.
         -- NUNCA passe de 90 em jogo real: o anti-cheat do BF detecta 180.
@@ -78,6 +82,14 @@ local CONFIG = {
     Marker = {
         Enabled = true,
         Color   = Color3.fromRGB(255, 60, 60),
+    },
+    -- FOV VISUAL: círculo na tela mostrando o cone do aimbot
+    FOVCircle = {
+        Enabled   = true,
+        Color     = Color3.fromRGB(90, 200, 130),
+        Transparency = 0.8,
+        Thickness = 1,
+        Sides     = 64,
     },
     Persist = { Enabled = true, Path = "BF_APEX_v5.json" },
 }
@@ -271,10 +283,47 @@ local function charOf(p)
 end
 local function alive(p) local _, _, u = charOf(p) return u ~= nil end
 
+-- Facção do BF: retorna "Pirate", "Marine" ou nil
+local function getFaction(p)
+    -- 1) Team.Name costuma ser "Pirates" / "Marines"
+    if p.Team and p.Team.Name then
+        local n = p.Team.Name:lower()
+        if n:find("pirate") then return "Pirate" end
+        if n:find("marine") then return "Marine" end
+    end
+    -- 2) Attribute "Faction" / "Team"
+    local a = p:GetAttribute("Faction") or p:GetAttribute("Team")
+    if a then
+        local n = tostring(a):lower()
+        if n:find("pirate") then return "Pirate" end
+        if n:find("marine") then return "Marine" end
+    end
+    -- 3) leaderstats "Team" / "Faction"
+    local ls = p:FindFirstChild("leaderstats")
+    if ls then
+        for _, name in ipairs({ "Team", "Faction" }) do
+            local v = ls:FindFirstChild(name)
+            if v and v.Value then
+                local n = tostring(v.Value):lower()
+                if n:find("pirate") then return "Pirate" end
+                if n:find("marine") then return "Marine" end
+            end
+        end
+    end
+    return nil
+end
+
 local function ally(p)
     if p == LocalPlayer then return true end
     if CONFIG.Target.TeamCheck and p.Team and LocalPlayer.Team and p.Team == LocalPlayer.Team then
         return true
+    end
+    if CONFIG.Target.FactionCheck then
+        local myFac = getFaction(LocalPlayer)
+        local theirFac = getFaction(p)
+        if myFac and theirFac and myFac == theirFac then
+            return true -- mesma facção = aliado
+        end
     end
     if CONFIG.Target.FriendCheck then
         local c = State.FriendCache[p.UserId]
@@ -618,6 +667,7 @@ local function markerTick()
         MK.tx.Text = string.format("%s  %d%%", MK.pr.DisplayName or MK.pr.Name,
             math.floor((u.Health / math.max(u.MaxHealth, 1)) * 100))
     end
+    updateFOVCircle()
 end
 
 -- ══════════════ DOT (pontinho, opcional) ══════════════
@@ -646,6 +696,58 @@ local function dotTick()
     local v, on = cam:WorldToViewportPoint(r.Position)
     State.Dot.Visible = on and v.Z > 0
     if State.Dot.Visible then State.Dot.Position = UDim2.fromOffset(v.X - 2, v.Y - 2) end
+end
+
+-- ══════════════ FOV CIRCLE (visual do cone do aimbot) ══════════════
+local FOVCircle = nil
+local function createFOVCircle()
+    if not CONFIG.FOVCircle.Enabled then return end
+    local c = Instance.new("Frame")
+    c.Name = "APEX_FOVCircle"
+    c.BackgroundTransparency = 1
+    c.Size = UDim2.fromOffset(0, 0)
+    c.Position = UDim2.fromScale(0.5, 0.5)
+    c.AnchorPoint = Vector2.new(0.5, 0.5)
+    c.ZIndex = 1
+    local stroke = Instance.new("UIStroke")
+    stroke.Color = CONFIG.FOVCircle.Color
+    stroke.Transparency = CONFIG.FOVCircle.Transparency
+    stroke.Thickness = CONFIG.FOVCircle.Thickness
+    stroke.ApplyStrokeMode = Enum.ApplyStrokeMode.Border
+    stroke.Parent = c
+    local corner = Instance.new("UICorner")
+    corner.CornerRadius = UDim.new(1, 0)
+    corner.Parent = c
+    c.Parent = ScreenGui
+    FOVCircle = c
+end
+
+local function updateFOVCircle()
+    if not CONFIG.FOVCircle.Enabled then
+        if FOVCircle then FOVCircle.Visible = false end
+        return
+    end
+    if not FOVCircle then createFOVCircle() end
+    if not FOVCircle then return end
+    local cam = Workspace.CurrentCamera
+    if not cam then FOVCircle.Visible = false return end
+    -- Calcula o raio em pixels baseado no FOVDeg e no viewport
+    local vp = cam.ViewportSize
+    local verticalFov = cam.FieldOfView -- graus
+    local halfFovRad = math.rad(verticalFov / 2)
+    -- Tamanho do viewport em world units na distância 1 stud
+    -- worldHeightAt1 = 2 * tan(fov/2)
+    -- pixelsPerStudAt1 = vp.Y / worldHeightAt1
+    -- Queremos raio em pixels para o nosso FOVDeg:
+    -- raioPixels = tan(FOVDeg/2) * pixelsPerStudAt1
+    -- Simplificado: proporção do nosso FOV sobre o FOV da câmera
+    local ratio = math.tan(math.rad(CONFIG.Target.FOVDeg / 2)) / math.tan(halfFovRad)
+    local radius = math.min(vp.X, vp.Y) * 0.5 * ratio
+    FOVCircle.Size = UDim2.fromOffset(radius * 2, radius * 2)
+    FOVCircle.Visible = true
+    FOVCircle.UIStroke.Color = CONFIG.FOVCircle.Color
+    FOVCircle.UIStroke.Transparency = CONFIG.FOVCircle.Transparency
+    FOVCircle.UIStroke.Thickness = CONFIG.FOVCircle.Thickness
 end
 
 -- ══════════════ GUI (mínima: status + alvo + exclusão) ══════════════
@@ -805,15 +907,21 @@ local function refreshList()
             local pv = pvpOn(p)
             local _, _, u = charOf(p)
             local hp = u and math.floor(u.Health) or 0
+            local bounty = bountyOf(p)
+            local fac = getFaction(p) or "?"
             local col = TZ.txt
             if isI then col = TZ.off
             elseif isA then col = TZ.on end
             local tag = pv and "PvP" or "OFF"
+            -- Cor da facção: Pirate = laranja, Marine = azul
+            local facColor = TZ.txt
+            if fac == "Pirate" then facColor = Color3.fromRGB(255, 160, 60)
+            elseif fac == "Marine" then facColor = Color3.fromRGB(60, 140, 255) end
             local row = New("TextButton", {
                 Size = UDim2.new(1, 0, 0, 20),
                 BackgroundColor3 = TZ.bg,
-                Text = string.format("  %s%s  ·  %dHP  ·  $%d  ·  %s",
-                    (isI and "[X] " or ""), p.DisplayName or p.Name, hp, bountyOf(p), tag),
+                Text = string.format("  %s%s  ·  %dHP  ·  $%d  ·  [%s]  ·  %s",
+                    (isI and "[X] " or ""), p.DisplayName or p.Name, hp, bounty, fac, tag),
                 TextColor3 = col,
                 Font = Enum.Font.Gotham,
                 TextSize = 10,
@@ -821,15 +929,16 @@ local function refreshList()
                 AutoButtonColor = false,
             }, PList)
             corner(row, 4)
+            -- Label de facção colorida ao clicar (feedback visual)
             row.MouseButton1Click:Connect(function()
                 local id = tostring(p.UserId)
                 State.Ignore[id] = not State.Ignore[id] or nil
                 if State.Ignore[id] then
-                    notify("Excluído do aimbot: " .. p.DisplayName)
+                    notify("Excluído do aimbot: " .. p.DisplayName .. " (" .. fac .. ")")
                     if State.Locked == p then State.Locked = nil updateMarker() UI.refreshTarget() clearMarker() end
                 else
                     State.Ignore[id] = nil
-                    notify("Incluído de volta: " .. p.DisplayName)
+                    notify("Incluído de volta: " .. p.DisplayName .. " (" .. fac .. ")")
                 end
                 saveCfg()
                 refreshList()
@@ -953,6 +1062,7 @@ function cleanup()
     for _, c in ipairs(State.Conns) do pcall(function() c:Disconnect() end) end
     clearMarker()
     if State.Dot then pcall(function() State.Dot:Destroy() end) end
+    if FOVCircle then pcall(function() FOVCircle:Destroy() end) end
     pcall(function() ScreenGui:Destroy() end)
     genv.BF_APEX = nil
     notify("Descarregado.")
@@ -968,4 +1078,8 @@ UI.updateVis()
 resolveSkillSlots()
 bindSkillSignals()
 
-notify("Carregado. RightShift=Aim | RightAlt=Auto | RightCtrl=menu | End=unload | R=Soru | MB4=ciclar | MB5=legit")
+-- Inicializa FOV circle visual
+createFOVCircle()
+updateFOVCircle()
+
+notify("Carregado. RightShift=Aim | RightAlt=Auto | RightCtrl=menu | Delete=unload | G=ciclar | R=Soru | MB4/MB5=mouse")

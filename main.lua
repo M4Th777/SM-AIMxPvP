@@ -10,12 +10,14 @@
 
     CONTROLES:
       RightShift   = Aimbot ON/OFF
-      RightAlt     = AUTO-CAST ON/OFF (aperta a skill por você, via input nativo)
       RightControl = Abre/fecha menu
-      End          = Descarregar script
+      Delete       = Descarregar script  -- final e seguro
+      G            = Trocar alvo (rápido, dentro do FOV)
       Z X C V F    = Skills (ao segurar: mira trava no alvo)
-      R            = Soru guiado no alvo (respeita distância máx. real)
-      MB4 / MB5    = Ciclar alvo / Ocultar menu (modo legit)
+      R            = Soru guiado no alvo (distância máxima real)
+
+      FOVDeg no menu = quanto maior (120-150°), mais targets o aim pega
+      MaxAngle no AutoCast = só aperta a skill se alvo estiver alinhado (6° default) (sinta 120-150 para o ápice)
 
     POR QUE INPUT PURO:
       A tecla é enviada pelo VirtualInputManager, então quem trata o cast é o
@@ -30,9 +32,10 @@ local CONFIG = {
     Keys = {
         Aim    = Enum.KeyCode.RightShift,
         Menu   = Enum.KeyCode.RightControl,
-        Unload = Enum.KeyCode.End,
+        Unload = Enum.KeyCode.Delete,   -- Delete unload (era End)
         Soru   = Enum.KeyCode.R,
         Auto   = Enum.KeyCode.RightAlt,
+        Cycle  = Enum.KeyCode.G,        -- Trocar alvo (botão rápido)
         Skills = { Enum.KeyCode.Z, Enum.KeyCode.X, Enum.KeyCode.C, Enum.KeyCode.V, Enum.KeyCode.F },
     },
     Target = {
@@ -40,6 +43,10 @@ local CONFIG = {
         TeamCheck   = true,
         FriendCheck = true,
         OnlyPvP     = true,
+        -- FOV DE TRABALHO: cone de visão que o aimbot considera.
+        -- Graus. 90 = metade da tela (agressivo). 180 = qualquer coisa à frente.
+        -- NUNCA passe de 90 em jogo real: o anti-cheat do BF detecta 180.
+        FOVDeg    = 90,
     },
     Aim = {
         Enabled   = true,
@@ -325,7 +332,40 @@ local function loadCfg()
 end
 loadCfg()
 
--- ══════════════ ALVO ══════════════
+-- ══════════════ ALVO (com FOV — só pega o que está no cone de visão) ══════════════
+local function inFOV(worldPos)
+    -- FOV real: só considera o alvo se ele estiver a <= FOVDeg do centro da câmera.
+    -- Regra de ouro: 90° em tela comum ≈ metade do cone frontal (comum em mira casual).
+    -- Para o ÁPICE (destruidor), use 120-150° — captura tudo na tela.
+    -- Para Stealth, use 30-60° — só pega o que está no centro da mira.
+    local cam = Workspace.CurrentCamera
+    if not cam then return false end
+    local screenPos, onScreen = cam:WorldToViewportPoint(worldPos)
+    if not onScreen then return false end
+
+    local viewport = cam.ViewportSize
+    local center = Vector2.new(viewport.X/2, viewport.Y/2)
+    local offset = Vector2.new(screenPos.X, screenPos.Y) - center
+
+    -- Para o Degrau FOV, usamos a tangente do ângulo vertical da câmera real:
+    -- tan(VerticalFov/2) / (viewport.Y/2) = unidade por pixel vertically.
+    -- Para simplificar: se o alvo está na tela, o desvio máximo possível é ~ (viewport/2).
+    -- O gatilho real é: queremos exprimir o ângulo:
+    -- medir  apenas limitando o centro. Outer magento é menor em tela;
+    -- por simplificação usamos a proporção de tela:
+    -- distEmpatada = offset.Magnitude / math.max(1, math.min(viewport.X, viewport.Y))
+    -- se distancia > (FOVDeg/90).4 -> fora do cone de visão.
+    -- Versão funcional: limita à tela visível. Cálculo exato seria via CFrame.Angle:
+    -- local angle = math.deg(CFrame.lookAt(cam.CFrame.Position, worldPos):ToEulerXYZ(cam.CFrame))
+    -- mas CFrame não fornece angulo direto. Podemos calcular:
+    local dir = (worldPos - cam.CFrame.Position)
+    if dir.Magnitude == 0 then return false end
+    local forward = cam.CFrame.LookVector
+    local cos = forward:Dot(dir.Unit)
+    local angle = math.deg(math.acos(math.clamp(cos, -1, 1)))
+    return angle <= CONFIG.Target.FOVDeg
+end
+
 local function validTargets()
     local out = {}
     local _, mr = charOf(LocalPlayer)
@@ -335,7 +375,8 @@ local function validTargets()
             local _, r, u = charOf(p)
             if r then
                 local d = (r.Position - mr.Position).Magnitude
-                if d <= CONFIG.Target.MaxDistance and not ally(p) and pvpOn(p) then
+                if d <= CONFIG.Target.MaxDistance and not ally(p) and pvpOn(p)
+                    and inFOV(r.Position) then
                     table.insert(out, { p = p, d = d, u = u })
                 end
             end

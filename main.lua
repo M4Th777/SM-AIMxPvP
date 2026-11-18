@@ -193,6 +193,9 @@ local State = {
 local function track(c) table.insert(State.Conns, c) return c end
 local function notify(m) print("[S+M] " .. tostring(m)) end
 
+-- Tabela de callbacks da UI (preenchida na construção da GUI, usada pelo loop/input)
+local UI = {}
+
 -- ══════════════ VIM / INPUT PURO ══════════════
 local VIM = nil
 do
@@ -595,7 +598,10 @@ local function aimFrame()
     if not pos then return end
     local cam = Workspace.CurrentCamera
     if not cam then return end
+    -- Só mexe na câmera se o alvo estiver realmente em outra direção (evita jitter/colar com a câmera parada)
     local des = CFrame.lookAt(cam.CFrame.Position, pos)
+    local dot = cam.CFrame.LookVector:Dot((pos - cam.CFrame.Position).Unit)
+    if dot > 0.9995 then return end
 
     if CONFIG.Aim.Smooth > 0 then
         if CONFIG.Aim.SmoothMethod == "Exponential" then
@@ -808,9 +814,12 @@ local function updateCircle()
     circle.Position = UDim2.fromScale(0.5, 0.5)
     circle.Visible = CONFIG.Circle.Enabled
 
-    circle.CircleStroke.Color = CONFIG.Circle.Color
-    circle.CircleStroke.Thickness = CONFIG.Circle.Thickness
-    circle.CircleStroke.Transparency = CONFIG.Circle.Transparency
+    local stroke = circle:FindFirstChild("CircleStroke")
+    if stroke then
+        stroke.Color = CONFIG.Circle.Color
+        stroke.Thickness = CONFIG.Circle.Thickness
+        stroke.Transparency = CONFIG.Circle.Transparency
+    end
 
     if CONFIG.Circle.FillEnabled then
         circle.BackgroundColor3 = CONFIG.Circle.FillColor
@@ -952,6 +961,7 @@ local Main = New("Frame", {
     Active = true,
     Visible = true,
     ZIndex = 100,
+    Selectable = true, -- não rouba foco de teclado do jogo
 }, ScreenGui)
 corner(Main)
 New("UIStroke", { Color = TZ.line, Thickness = 1 }, Main)
@@ -1171,19 +1181,19 @@ track(RunService.Heartbeat:Connect(function()
     -- Target picker (100ms)
     if now - (State.TickTarget or 0) > 0.1 then
         State.TickTarget = now
-        pickTarget()
-        if State.Locked and MK.pr ~= State.Locked then updateMarker() UI.refreshTarget() end
-        if not State.Locked and MK.pr then clearMarker() UI.refreshTarget() end
+        pcall(pickTarget)
+        if State.Locked and MK.pr ~= State.Locked then pcall(updateMarker) UI.refreshTarget() end
+        if not State.Locked and MK.pr then pcall(clearMarker) UI.refreshTarget() end
     end
 
     -- Lista + marker + circle (2s)
     if now - (State.TickList or 0) > 2.0 then
         State.TickList = now
-        markerTick()
+        pcall(markerTick)
     end
 
-    soruFrame()
-    autoTick()
+    pcall(soruFrame)
+    pcall(autoTick)
 end))
 
 -- ══════════════ CLEANUP ══════════════
@@ -1192,6 +1202,14 @@ function cleanup()
     State.Unloaded = true
     pcall(function() RunService:UnbindFromRenderStep("SM_CIRCLE_AIM") end)
     for _, c in ipairs(State.Conns) do pcall(function() c:Disconnect() end) end
+    State.Conns = {}
+    -- devolve estado do personagem (alguns executores ficam presos se a câmera foi forçada)
+    pcall(function()
+        local hum = LocalPlayer.Character and LocalPlayer.Character:FindFirstChildOfClass("Humanoid")
+        if hum then hum:ChangeState(Enum.HumanoidStateType.Running) end
+        local cam = Workspace.CurrentCamera
+        if cam then cam.CameraType = Enum.CameraType.Custom end
+    end)
     clearMarker()
     if State.CircleObj then pcall(function() State.CircleObj:Destroy() end) end
     if State.CrosshairObj then pcall(function() State.CrosshairObj:Destroy() end) end
@@ -1202,13 +1220,15 @@ end
 genv.SM_APEX = { Destroy = cleanup }
 
 -- ══════════════ INIT ══════════════
-resolveSkillSlots()
-bindSkillSignals()
-State.CircleObj = createCircle()
-State.CircleObj.Parent = ScreenGui
-State.CrosshairObj = createCrosshair()
-State.CrosshairObj.Parent = ScreenGui
-updateCircle()
-updateCrosshair()
+pcall(resolveSkillSlots)
+pcall(bindSkillSignals)
+pcall(function()
+    State.CircleObj = createCircle()
+    State.CircleObj.Parent = ScreenGui
+    State.CrosshairObj = createCrosshair()
+    State.CrosshairObj.Parent = ScreenGui
+    updateCircle()
+    updateCrosshair()
+end)
 
 notify("S+M APEX loaded. RightShift=Aim | RightAlt=Auto | RightCtrl=Menu | Delete=Unload | G=Cycle | R=Soru | MB4/MB5=Mouse")
